@@ -8,15 +8,18 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import requests
 from notion_client import Client
 from notion_client.errors import APIResponseError
 
 from config import NOTION_DATABASE_ID, NOTION_TOKEN
+from stores import PDD_STORES
 
 
-STORE_ID = "22"
-STORE_NAME = "1店：利德仕官方旗舰店"
+DEFAULT_STORE_NAME = "1店：利德仕官方旗舰店"
 NOTION_NOTIFY_USER_ID = "356d872b-594c-8146-b021-0002d1442e4e"
+NOTION_API_BASE = "https://api.notion.com/v1"
+NOTION_VERSION = "2025-09-03"
 
 PERCENT_FIELDS = {"click_rate", "convert_rate"}
 
@@ -25,6 +28,7 @@ FIELD_CANDIDATES = {
     "plan_id": ["plan_id", "计划ID", "广告计划ID"],
     "store": ["店铺", "store", "店铺ID"],
     "plan_name": ["广告计划", "plan_name", "广告计划名称"],
+    "ad_type": ["广告类型", "ad_type"],
     "spend": ["花费", "spend"],
     "spend_average": ["平均点击花费", "spend_average"],
     "click_rate": ["点击率", "click_rate"],
@@ -40,6 +44,7 @@ WRITE_FIELD_ORDER = [
     "plan_id",
     "store",
     "plan_name",
+    "ad_type",
     "spend",
     "spend_average",
     "click_rate",
@@ -62,29 +67,50 @@ class NotionSyncError(RuntimeError):
 
 
 def _require_config() -> None:
-    missing = []
     if not NOTION_TOKEN:
-        missing.append("NOTION_TOKEN")
-    if not NOTION_DATABASE_ID:
-        missing.append("NOTION_DATABASE_ID")
-    if missing:
-        raise NotionSyncError(f".env 缺少配置：{', '.join(missing)}")
+        raise NotionSyncError(".env 缺少配置：NOTION_TOKEN")
+
+
+def _default_database_id() -> str:
+    return NOTION_DATABASE_ID or PDD_STORES[0].database_id
 
 
 def get_notion_client() -> Client:
     _require_config()
-    http_client = httpx.Client(trust_env=False)
+    http_client = httpx.Client()
     return Client(auth=NOTION_TOKEN, client=http_client)
 
 
-def get_database_schema(client: Client) -> dict[str, PropertyInfo]:
+def get_data_source_id(client: Client, database_id: str | None = None) -> str:
+    resolved_database_id = database_id or _default_database_id()
     database = _with_retry(
-        lambda: client.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        lambda: client.databases.retrieve(database_id=resolved_database_id)
     )
-    if "properties" in database:
-        properties = database["properties"]
+    data_sources = database.get("data_sources") or []
+    if data_sources:
+        return data_sources[0]["id"]
+    return resolved_database_id
+
+
+def get_database_schema(
+    client: Client,
+    database_id: str | None = None,
+    data_source_id: str | None = None,
+) -> dict[str, PropertyInfo]:
+    if data_source_id is None:
+        resolved_database_id = database_id or _default_database_id()
+        database = _with_retry(
+            lambda: client.databases.retrieve(database_id=resolved_database_id)
+        )
+        if "properties" in database:
+            properties = database["properties"]
+        else:
+            data_source_id = get_data_source_id(client, resolved_database_id)
+            data_source = _with_retry(
+                lambda: client.data_sources.retrieve(data_source_id=data_source_id)
+            )
+            properties = data_source["properties"]
     else:
-        data_source_id = get_data_source_id(client)
         data_source = _with_retry(
             lambda: client.data_sources.retrieve(data_source_id=data_source_id)
         )
@@ -96,24 +122,13 @@ def get_database_schema(client: Client) -> dict[str, PropertyInfo]:
     }
 
 
-def get_data_source_id(client: Client) -> str:
-    database = _with_retry(
-        lambda: client.databases.retrieve(database_id=NOTION_DATABASE_ID)
-    )
-    data_sources = database.get("data_sources") or []
-    if data_sources:
-        return data_sources[0]["id"]
-    return NOTION_DATABASE_ID
-
-
 def get_notification_page_id(client: Client) -> str:
-    database = _with_retry(
-        lambda: client.databases.retrieve(database_id=NOTION_DATABASE_ID)
-    )
+    database_id = _default_database_id()
+    database = _with_retry(lambda: client.databases.retrieve(database_id=database_id))
     parent = database.get("parent", {})
     if parent.get("type") == "page_id":
         return parent["page_id"]
-    return NOTION_DATABASE_ID
+    return database_id
 
 
 def notify_notion(message: str) -> None:
@@ -142,7 +157,7 @@ def notify_notion(message: str) -> None:
         )
         return
     except APIResponseError:
-        # Some integrations can write pages but cannot use the Comments API.
+        # 有些 integration 可以创建页面，但没有 Comments API 权限。
         pass
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -170,9 +185,9 @@ def notify_notion(message: str) -> None:
     )
 
 
-def print_database_schema() -> None:
+def print_database_schema(database_id: str | None = None) -> None:
     client = get_notion_client()
-    schema = get_database_schema(client)
+    schema = get_database_schema(client, database_id=database_id)
     print("Notion 数据库列：")
     for prop in schema.values():
         print(f"- {prop.name}: {prop.type}")
@@ -192,10 +207,7 @@ def build_field_mapping(schema: dict[str, PropertyInfo]) -> dict[str, PropertyIn
     required = ["make_time", "plan_id", "store"]
     missing = [key for key in required if key not in mapping]
     if missing:
-        readable = {
-            key: " / ".join(FIELD_CANDIDATES[key])
-            for key in missing
-        }
+        readable = {key: " / ".join(FIELD_CANDIDATES[key]) for key in missing}
         raise NotionSyncError(f"Notion 数据库缺少三键判重列：{readable}")
 
     return mapping
@@ -255,10 +267,22 @@ def _notion_value(prop_type: str, field_key: str, value: Any) -> dict | None:
     return None
 
 
+def infer_ad_type(row: dict) -> str | None:
+    plan_name = str(row.get("plan_name") or row.get("广告计划") or "").strip()
+    plan_id = str(row.get("plan_id") or "").strip()
+
+    if "全店托管" in plan_name:
+        return "全店托管"
+    if "ID" in plan_name.upper() or plan_id:
+        return "稳定成本"
+    return None
+
+
 def build_page_properties(row: dict, mapping: dict[str, PropertyInfo]) -> dict:
     properties = {}
     values = dict(row)
-    values["store"] = STORE_NAME
+    values["store"] = row.get("store_name") or DEFAULT_STORE_NAME
+    values["ad_type"] = infer_ad_type(row)
 
     for field_key in WRITE_FIELD_ORDER:
         prop = mapping.get(field_key)
@@ -291,10 +315,11 @@ def find_existing_page(
     row: dict,
     mapping: dict[str, PropertyInfo],
 ) -> str | None:
+    store_name = row.get("store_name") or DEFAULT_STORE_NAME
     filters = [
         _filter_equals(mapping["make_time"], str(row["make_time"])),
         _filter_equals(mapping["plan_id"], str(row["plan_id"])),
-        _filter_equals(mapping["store"], STORE_NAME),
+        _filter_equals(mapping["store"], store_name),
     ]
 
     response = _with_retry(
@@ -342,20 +367,124 @@ def upsert_row(
     return "created"
 
 
-def sync_rows_to_notion(rows: list[dict]) -> dict[str, int]:
-    client = get_notion_client()
-    schema = get_database_schema(client)
+def sync_rows_to_notion(
+    rows: list[dict],
+    *,
+    database_id: str | None = None,
+    data_source_id: str | None = None,
+) -> dict[str, int]:
+    resolved_data_source_id = data_source_id or _get_data_source_id_rest(database_id)
+    schema = _get_database_schema_rest(resolved_data_source_id)
     mapping = build_field_mapping(schema)
-    data_source_id = get_data_source_id(client)
 
     stats = {"created": 0, "updated": 0}
     for index, row in enumerate(rows, start=1):
-        action = upsert_row(client, data_source_id, row, mapping)
+        action = _upsert_row_rest(resolved_data_source_id, row, mapping)
         stats[action] += 1
         if index % 20 == 0:
             print(f"已同步 {index}/{len(rows)} 行")
 
     return stats
+
+
+def _notion_headers() -> dict[str, str]:
+    _require_config()
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": NOTION_VERSION,
+    }
+
+
+def _notion_request(method: str, path: str, *, payload: dict | None = None) -> dict:
+    delay = 1
+    last_error: Exception | None = None
+
+    for _ in range(8):
+        session = requests.Session()
+        try:
+            response = session.request(
+                method,
+                f"{NOTION_API_BASE}{path}",
+                headers=_notion_headers(),
+                json=payload,
+                timeout=30,
+            )
+            if response.status_code == 429:
+                retry_after = float(response.headers.get("Retry-After", delay))
+                time.sleep(retry_after)
+                continue
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            last_error = exc
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+        finally:
+            session.close()
+
+    raise NotionSyncError(f"Notion 请求失败：{method} {path}") from last_error
+
+
+def _get_data_source_id_rest(database_id: str | None = None) -> str:
+    resolved_database_id = database_id or _default_database_id()
+    database = _notion_request("GET", f"/databases/{resolved_database_id}")
+    data_sources = database.get("data_sources") or []
+    if data_sources:
+        return data_sources[0]["id"]
+    return resolved_database_id
+
+
+def _get_database_schema_rest(data_source_id: str) -> dict[str, PropertyInfo]:
+    data_source = _notion_request("GET", f"/data_sources/{data_source_id}")
+    properties = data_source["properties"]
+    return {
+        name: PropertyInfo(name=name, type=value["type"])
+        for name, value in properties.items()
+    }
+
+
+def _find_existing_page_rest(
+    data_source_id: str,
+    row: dict,
+    mapping: dict[str, PropertyInfo],
+) -> str | None:
+    store_name = row.get("store_name") or DEFAULT_STORE_NAME
+    filters = [
+        _filter_equals(mapping["make_time"], str(row["make_time"])),
+        _filter_equals(mapping["plan_id"], str(row["plan_id"])),
+        _filter_equals(mapping["store"], store_name),
+    ]
+    response = _notion_request(
+        "POST",
+        f"/data_sources/{data_source_id}/query",
+        payload={"filter": {"and": filters}, "page_size": 1},
+    )
+    results = response.get("results", [])
+    return results[0]["id"] if results else None
+
+
+def _upsert_row_rest(
+    data_source_id: str,
+    row: dict,
+    mapping: dict[str, PropertyInfo],
+) -> str:
+    properties = build_page_properties(row, mapping)
+    page_id = _find_existing_page_rest(data_source_id, row, mapping)
+
+    if page_id:
+        _notion_request("PATCH", f"/pages/{page_id}", payload={"properties": properties})
+        return "updated"
+
+    _notion_request(
+        "POST",
+        "/pages",
+        payload={
+            "parent": {"data_source_id": data_source_id},
+            "properties": properties,
+        },
+    )
+    return "created"
 
 
 def load_step_b_rows(path: Path = Path("debug/parsed_rows_step_b.json")) -> list[dict]:
@@ -367,9 +496,9 @@ def run_step_c(dry_run: bool = False) -> None:
     print(f"准备同步 {len(rows)} 行到 Notion")
 
     client = get_notion_client()
-    schema = get_database_schema(client)
-    mapping = build_field_mapping(schema)
     data_source_id = get_data_source_id(client)
+    schema = get_database_schema(client, data_source_id=data_source_id)
+    mapping = build_field_mapping(schema)
 
     print("字段映射：")
     for field_key in WRITE_FIELD_ORDER:

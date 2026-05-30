@@ -12,6 +12,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 import requests
 
+from stores import get_store
+
 
 ERP_HOME_URL = "https://ldswj.net/leedis2/public/"
 ERP_PDD_AD_URL = (
@@ -332,13 +334,20 @@ def fetch_ad_rows(
     begin_date: str,
     end_date: str,
     *,
+    store_id: str = "22",
     force_relogin: bool = False,
 ) -> list[dict]:
     if force_relogin:
         relogin()
 
-    start_url = build_pdd_ad_url(begin_date=begin_date, end_date=end_date, page=1)
-    logging.info("开始抓取 ERP：%s ~ %s", begin_date, end_date)
+    store = get_store(store_id)
+    start_url = build_pdd_ad_url(
+        begin_date=begin_date,
+        end_date=end_date,
+        page=1,
+        store=store.id,
+    )
+    logging.info("开始抓取 ERP：%s ~ %s，%s", begin_date, end_date, store.name)
 
     first_html, final_url = fetch_html_with_login(start_url, allow_relogin=force_relogin)
     total_pages = get_total_pages(first_html)
@@ -347,6 +356,9 @@ def fetch_ad_rows(
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     (DEBUG_DIR / "page_current_p1.html").write_text(first_html, encoding="utf-8")
     rows = parse_ad_table(first_html)
+    for row in rows:
+        row["store_id"] = store.id
+        row["store_name"] = store.name
     logging.info("第 1 页解析到 %s 行", len(rows))
 
     all_rows = list(rows)
@@ -357,6 +369,9 @@ def fetch_ad_rows(
         html, final_url = fetch_html_with_login(next_url, allow_relogin=force_relogin)
         (DEBUG_DIR / f"page_current_p{page_index}.html").write_text(html, encoding="utf-8")
         rows = parse_ad_table(html)
+        for row in rows:
+            row["store_id"] = store.id
+            row["store_name"] = store.name
         logging.info("第 %s 页解析到 %s 行", page_index, len(rows))
         all_rows.extend(rows)
         next_url = get_next_page_url(html, final_url)
