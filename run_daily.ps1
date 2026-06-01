@@ -10,5 +10,5 @@ Set-Location -LiteralPath $ProjectDir
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFile = Join-Path $LogDir "task_$Stamp.log"
 
-& $PythonExe (Join-Path $ProjectDir "main.py") *>&1 | Tee-Object -FilePath $LogFile
+& $PythonExe (Join-Path $ProjectDir "main.py") --store all *>&1 | Tee-Object -FilePath $LogFile
 exit $LASTEXITCODE

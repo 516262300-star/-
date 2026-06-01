@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,7 @@ FIELD_CANDIDATES = {
     "store": ["店铺", "store", "店铺ID"],
     "plan_name": ["广告计划", "plan_name", "广告计划名称"],
     "ad_type": ["广告类型", "ad_type"],
+    "product_id": ["商品ID", "product_id"],
     "spend": ["花费", "spend"],
     "spend_average": ["平均点击花费", "spend_average"],
     "click_rate": ["点击率", "click_rate"],
@@ -45,6 +47,7 @@ WRITE_FIELD_ORDER = [
     "store",
     "plan_name",
     "ad_type",
+    "product_id",
     "spend",
     "spend_average",
     "click_rate",
@@ -278,11 +281,28 @@ def infer_ad_type(row: dict) -> str | None:
     return None
 
 
+def infer_product_id(row: dict) -> str | None:
+    if infer_ad_type(row) != "稳定成本":
+        return None
+
+    plan_name = str(row.get("plan_name") or row.get("广告计划") or "").strip()
+    match = re.search(r"商品\s*ID\s*[：:]\s*(\d+)", plan_name, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    match = re.search(r"\bID\s*[：:]\s*(\d+)", plan_name, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return None
+
+
 def build_page_properties(row: dict, mapping: dict[str, PropertyInfo]) -> dict:
     properties = {}
     values = dict(row)
     values["store"] = row.get("store_name") or DEFAULT_STORE_NAME
     values["ad_type"] = infer_ad_type(row)
+    values["product_id"] = infer_product_id(row)
 
     for field_key in WRITE_FIELD_ORDER:
         prop = mapping.get(field_key)
@@ -374,12 +394,16 @@ def sync_rows_to_notion(
     data_source_id: str | None = None,
 ) -> dict[str, int]:
     resolved_data_source_id = data_source_id or _get_data_source_id_rest(database_id)
-    schema = _get_database_schema_rest(resolved_data_source_id)
+    try:
+        schema = _get_database_schema_rest(resolved_data_source_id)
+    except Exception:
+        schema = _known_database_schema()
     mapping = build_field_mapping(schema)
+    existing_pages = _load_existing_page_index(resolved_data_source_id, rows, mapping)
 
     stats = {"created": 0, "updated": 0}
     for index, row in enumerate(rows, start=1):
-        action = _upsert_row_rest(resolved_data_source_id, row, mapping)
+        action = _upsert_row_rest(resolved_data_source_id, row, mapping, existing_pages)
         stats[action] += 1
         if index % 20 == 0:
             print(f"已同步 {index}/{len(rows)} 行")
@@ -400,28 +424,39 @@ def _notion_request(method: str, path: str, *, payload: dict | None = None) -> d
     delay = 1
     last_error: Exception | None = None
 
-    for _ in range(8):
-        session = requests.Session()
-        try:
-            response = session.request(
-                method,
-                f"{NOTION_API_BASE}{path}",
-                headers=_notion_headers(),
-                json=payload,
-                timeout=30,
-            )
-            if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", delay))
-                time.sleep(retry_after)
-                continue
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            last_error = exc
-            time.sleep(delay)
-            delay = min(delay * 2, 30)
-        finally:
-            session.close()
+    for _ in range(20):
+        for trust_env in (False, True):
+            session = requests.Session()
+            session.trust_env = trust_env
+            try:
+                headers = _notion_headers()
+                headers["Connection"] = "close"
+                response = session.request(
+                    method,
+                    f"{NOTION_API_BASE}{path}",
+                    headers=headers,
+                    json=payload,
+                    timeout=45,
+                )
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("Retry-After", delay))
+                    time.sleep(retry_after)
+                    continue
+                if response.status_code >= 400:
+                    error_text = response.text[:1000]
+                    raise NotionSyncError(
+                        f"Notion HTTP {response.status_code}: {error_text}"
+                    )
+                result = response.json()
+                time.sleep(0.25)
+                return result
+            except Exception as exc:
+                last_error = exc
+            finally:
+                session.close()
+
+        time.sleep(delay)
+        delay = min(delay * 1.5, 20)
 
     raise NotionSyncError(f"Notion 请求失败：{method} {path}") from last_error
 
@@ -442,6 +477,119 @@ def _get_database_schema_rest(data_source_id: str) -> dict[str, PropertyInfo]:
         name: PropertyInfo(name=name, type=value["type"])
         for name, value in properties.items()
     }
+
+
+def _known_database_schema() -> dict[str, PropertyInfo]:
+    known_types = {
+        "日期": "date",
+        "plan_id": "rich_text",
+        "店铺": "select",
+        "广告计划": "title",
+        "广告类型": "select",
+        "商品ID": "rich_text",
+        "花费": "number",
+        "平均点击花费": "number",
+        "点击率": "number",
+        "转化率": "number",
+        "收藏店铺数": "number",
+        "收藏商品数": "number",
+        "广告成交金额": "number",
+        "ERP记录ID": "rich_text",
+    }
+    return {
+        name: PropertyInfo(name=name, type=prop_type)
+        for name, prop_type in known_types.items()
+    }
+
+
+def _row_key(row: dict, mapping: dict[str, PropertyInfo]) -> tuple[str, str, str]:
+    return (
+        str(row["make_time"]),
+        str(row["plan_id"]),
+        str(row.get("store_name") or DEFAULT_STORE_NAME),
+    )
+
+
+def _plain_property_value(prop: dict, prop_type: str) -> str:
+    if prop_type == "date":
+        date_value = prop.get("date") or {}
+        return str(date_value.get("start") or "")
+    if prop_type == "select":
+        select_value = prop.get("select") or {}
+        return str(select_value.get("name") or "")
+    if prop_type == "title":
+        return "".join(item.get("plain_text", "") for item in prop.get("title", []))
+    if prop_type == "rich_text":
+        return "".join(item.get("plain_text", "") for item in prop.get("rich_text", []))
+    if prop_type == "number":
+        return "" if prop.get("number") is None else str(prop.get("number"))
+    return ""
+
+
+def _page_key(
+    page: dict,
+    mapping: dict[str, PropertyInfo],
+) -> tuple[str, str, str] | None:
+    properties = page.get("properties", {})
+    try:
+        make_time_prop = mapping["make_time"]
+        plan_id_prop = mapping["plan_id"]
+        store_prop = mapping["store"]
+        return (
+            _plain_property_value(properties[make_time_prop.name], make_time_prop.type),
+            _plain_property_value(properties[plan_id_prop.name], plan_id_prop.type),
+            _plain_property_value(properties[store_prop.name], store_prop.type),
+        )
+    except KeyError:
+        return None
+
+
+def _date_range_filters(rows: list[dict], mapping: dict[str, PropertyInfo]) -> dict | None:
+    dates = sorted({str(row.get("make_time") or "") for row in rows if row.get("make_time")})
+    if not dates:
+        return None
+
+    make_time_prop = mapping["make_time"]
+    return {
+        "and": [
+            {
+                "property": make_time_prop.name,
+                "date": {"on_or_after": dates[0]},
+            },
+            {
+                "property": make_time_prop.name,
+                "date": {"on_or_before": dates[-1]},
+            },
+        ]
+    }
+
+
+def _load_existing_page_index(
+    data_source_id: str,
+    rows: list[dict],
+    mapping: dict[str, PropertyInfo],
+) -> dict[tuple[str, str, str], str]:
+    page_index: dict[tuple[str, str, str], str] = {}
+    payload: dict[str, Any] = {"page_size": 10}
+    date_filter = _date_range_filters(rows, mapping)
+    if date_filter:
+        payload["filter"] = date_filter
+
+    while True:
+        response = _notion_request(
+            "POST",
+            f"/data_sources/{data_source_id}/query",
+            payload=payload,
+        )
+        for page in response.get("results", []):
+            key = _page_key(page, mapping)
+            if key is not None:
+                page_index[key] = page["id"]
+
+        if not response.get("has_more"):
+            return page_index
+
+        payload["start_cursor"] = response.get("next_cursor")
 
 
 def _find_existing_page_rest(
@@ -468,15 +616,19 @@ def _upsert_row_rest(
     data_source_id: str,
     row: dict,
     mapping: dict[str, PropertyInfo],
+    existing_pages: dict[tuple[str, str, str], str] | None = None,
 ) -> str:
     properties = build_page_properties(row, mapping)
-    page_id = _find_existing_page_rest(data_source_id, row, mapping)
+    key = _row_key(row, mapping)
+    page_id = existing_pages.get(key) if existing_pages is not None else None
+    if page_id is None and existing_pages is None:
+        page_id = _find_existing_page_rest(data_source_id, row, mapping)
 
     if page_id:
         _notion_request("PATCH", f"/pages/{page_id}", payload={"properties": properties})
         return "updated"
 
-    _notion_request(
+    response = _notion_request(
         "POST",
         "/pages",
         payload={
@@ -484,6 +636,8 @@ def _upsert_row_rest(
             "properties": properties,
         },
     )
+    if existing_pages is not None:
+        existing_pages[key] = response.get("id", "")
     return "created"
 
 
