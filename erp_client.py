@@ -40,6 +40,12 @@ AD_FIELD_KEYS = [
     "convert_rate",
     "collect_shop_count",
     "collect_goods_count",
+    "roi",
+    "impressions",
+    "promotion_exposure_rate",
+    "order_count",
+    "cost_per_order",
+    "amount_per_order",
     "amount_ad",
     "make_time",
 ]

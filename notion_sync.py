@@ -22,7 +22,13 @@ NOTION_NOTIFY_USER_ID = "356d872b-594c-8146-b021-0002d1442e4e"
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2025-09-03"
 
-PERCENT_FIELDS = {"click_rate", "convert_rate"}
+PERCENT_FIELDS = {"click_rate", "convert_rate", "promotion_exposure_rate"}
+INTEGER_FIELDS = {
+    "collect_shop_count",
+    "collect_goods_count",
+    "impressions",
+    "order_count",
+}
 
 FIELD_CANDIDATES = {
     "make_time": ["日期", "make_time", "数据日期"],
@@ -37,6 +43,12 @@ FIELD_CANDIDATES = {
     "convert_rate": ["转化率", "convert_rate"],
     "collect_shop_count": ["收藏店铺数", "collect_shop_count"],
     "collect_goods_count": ["收藏商品数", "collect_goods_count"],
+    "roi": ["投产比", "roi"],
+    "impressions": ["曝光量", "impressions"],
+    "promotion_exposure_rate": ["推广曝光占比", "promotion_exposure_rate"],
+    "order_count": ["成交笔数", "order_count"],
+    "cost_per_order": ["每笔成交花费", "cost_per_order"],
+    "amount_per_order": ["每笔成交金额", "amount_per_order"],
     "amount_ad": ["广告成交金额", "amount_ad"],
     "record_id": ["ERP记录ID", "record_id"],
 }
@@ -54,6 +66,12 @@ WRITE_FIELD_ORDER = [
     "convert_rate",
     "collect_shop_count",
     "collect_goods_count",
+    "roi",
+    "impressions",
+    "promotion_exposure_rate",
+    "order_count",
+    "cost_per_order",
+    "amount_per_order",
     "amount_ad",
     "record_id",
 ]
@@ -255,7 +273,7 @@ def _notion_value(prop_type: str, field_key: str, value: Any) -> dict | None:
     if prop_type == "rich_text":
         return _to_rich_text(value)
     if prop_type == "number":
-        if field_key in {"collect_shop_count", "collect_goods_count"}:
+        if field_key in INTEGER_FIELDS:
             return {"number": _to_int(value)}
         return {"number": _to_float(value, percent=field_key in PERCENT_FIELDS)}
     if prop_type == "date":
@@ -493,6 +511,12 @@ def _known_database_schema() -> dict[str, PropertyInfo]:
         "转化率": "number",
         "收藏店铺数": "number",
         "收藏商品数": "number",
+        "投产比": "number",
+        "曝光量": "number",
+        "推广曝光占比": "number",
+        "成交笔数": "number",
+        "每笔成交花费": "number",
+        "每笔成交金额": "number",
         "广告成交金额": "number",
         "ERP记录ID": "rich_text",
     }
@@ -570,7 +594,7 @@ def _load_existing_page_index(
     mapping: dict[str, PropertyInfo],
 ) -> dict[tuple[str, str, str], str]:
     page_index: dict[tuple[str, str, str], str] = {}
-    payload: dict[str, Any] = {"page_size": 10}
+    payload: dict[str, Any] = {"page_size": 1}
     date_filter = _date_range_filters(rows, mapping)
     if date_filter:
         payload["filter"] = date_filter
