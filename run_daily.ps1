@@ -10,5 +10,9 @@ Set-Location -LiteralPath $ProjectDir
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFile = Join-Path $LogDir "task_$Stamp.log"
 
-& $PythonExe (Join-Path $ProjectDir "main.py") --store all *>&1 | Tee-Object -FilePath $LogFile
-exit $LASTEXITCODE
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Start PDD Notion sync" | Tee-Object -FilePath $LogFile
+$ErrorActionPreference = "Continue"
+& $PythonExe (Join-Path $ProjectDir "main.py") --store all 2>&1 | Tee-Object -FilePath $LogFile -Append
+$ExitCode = $LASTEXITCODE
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Exit code: $ExitCode" | Tee-Object -FilePath $LogFile -Append
+exit $ExitCode

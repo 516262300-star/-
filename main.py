@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from datetime import datetime, timedelta, timezone
 
 from erp_client import LoginRequiredError, fetch_ad_rows
@@ -104,6 +105,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
     )
 
     args = build_parser().parse_args()
