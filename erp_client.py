@@ -295,33 +295,34 @@ def password_login() -> None:
     if not has_password_login_config():
         raise LoginRequiredError("ERP 登录态已失效，且 .env 未配置 ERP_USERNAME / ERP_PASSWORD。")
 
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": ERP_USER_AGENT,
-            "Referer": ERP_LOGIN_PAGE_URL,
-            "X-Requested-With": "XMLHttpRequest",
-        }
-    )
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(ERP_LOGIN_PAGE_URL, wait_until="domcontentloaded", timeout=30000)
+        page.fill('input[name="phone"]', ERP_USERNAME)
+        page.fill('input[name="password"]', ERP_PASSWORD)
+        page.click("input.dl")
+        try:
+            page.wait_for_url("**/login/profile", timeout=10000)
+        except PlaywrightTimeoutError:
+            page.wait_for_timeout(3000)
 
-    session.get(ERP_LOGIN_PAGE_URL, timeout=30)
-    response = session.post(
-        ERP_LOGIN_ACTION_URL,
-        data={"phone": ERP_USERNAME, "password": ERP_PASSWORD},
-        timeout=30,
-    )
-    response.raise_for_status()
+        page.goto(ERP_PDD_AD_URL, wait_until="domcontentloaded", timeout=30000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
 
-    result = response.text.strip()
-    if result != "1":
-        raise LoginRequiredError(f"ERP 账号密码自动登录失败，接口返回：{result[:80]}")
+        html = page.content()
+        if is_login_page(html, page.url):
+            browser.close()
+            raise LoginRequiredError("ERP 账号密码自动登录后仍然停留在登录页，请检查账号密码或账号权限。")
 
-    html, final_url = _request_html(session, ERP_PDD_AD_URL)
-    if is_login_page(html, final_url):
-        raise LoginRequiredError("ERP 账号密码自动登录后仍然停留在登录页，请检查账号密码或账号权限。")
-
-    _save_session_cookies(session)
-    CURRENT_URL_PATH.write_text(final_url, encoding="utf-8")
+        context.storage_state(path=str(SESSION_PATH))
+        CURRENT_URL_PATH.write_text(page.url, encoding="utf-8")
+        browser.close()
     logging.info("ERP 账号密码自动登录成功，登录态已保存到 %s", SESSION_PATH)
 
 
