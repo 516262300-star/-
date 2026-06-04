@@ -12,10 +12,13 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 import requests
 
+from config import ERP_PASSWORD, ERP_USERNAME
 from stores import get_store
 
 
 ERP_HOME_URL = "https://ldswj.net/leedis2/public/"
+ERP_LOGIN_PAGE_URL = "https://ldswj.net/leedis/index.php/welcome/loginpage"
+ERP_LOGIN_ACTION_URL = "https://ldswj.net/leedis/index.php/welcome/loginact"
 ERP_PDD_AD_URL = (
     "https://ldswj.net/leedis2/public/admanager"
     "?action=ad_pdd_data&platform=22&store=22"
@@ -30,6 +33,11 @@ AUTH_DIR = Path(".auth")
 DEBUG_DIR = Path("debug")
 SESSION_PATH = AUTH_DIR / "session.json"
 CURRENT_URL_PATH = DEBUG_DIR / "current_url.txt"
+ERP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0 Safari/537.36"
+)
 
 AD_FIELD_KEYS = [
     "record_id",
@@ -246,15 +254,7 @@ def _load_storage_state_cookies() -> list[dict]:
 
 def build_requests_session() -> requests.Session:
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0 Safari/537.36"
-            )
-        }
-    )
+    session.headers.update({"User-Agent": ERP_USER_AGENT})
 
     for cookie in _load_storage_state_cookies():
         session.cookies.set(
@@ -267,7 +267,72 @@ def build_requests_session() -> requests.Session:
     return session
 
 
+def has_password_login_config() -> bool:
+    return bool(ERP_USERNAME and ERP_PASSWORD)
+
+
+def _save_session_cookies(session: requests.Session) -> None:
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    cookies = []
+    for cookie in session.cookies:
+        cookies.append(
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain or "ldswj.net",
+                "path": cookie.path or "/",
+                "expires": cookie.expires or -1,
+                "httpOnly": bool(cookie.has_nonstandard_attr("HttpOnly")),
+                "secure": bool(cookie.secure),
+                "sameSite": "Lax",
+            }
+        )
+
+    SESSION_PATH.write_text(json.dumps({"cookies": cookies}, indent=2), encoding="utf-8")
+
+
+def password_login() -> None:
+    if not has_password_login_config():
+        raise LoginRequiredError("ERP 登录态已失效，且 .env 未配置 ERP_USERNAME / ERP_PASSWORD。")
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": ERP_USER_AGENT,
+            "Referer": ERP_LOGIN_PAGE_URL,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+    )
+
+    session.get(ERP_LOGIN_PAGE_URL, timeout=30)
+    response = session.post(
+        ERP_LOGIN_ACTION_URL,
+        data={"phone": ERP_USERNAME, "password": ERP_PASSWORD},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    result = response.text.strip()
+    if result != "1":
+        raise LoginRequiredError(f"ERP 账号密码自动登录失败，接口返回：{result[:80]}")
+
+    html, final_url = _request_html(session, ERP_PDD_AD_URL)
+    if is_login_page(html, final_url):
+        raise LoginRequiredError("ERP 账号密码自动登录后仍然停留在登录页，请检查账号密码或账号权限。")
+
+    _save_session_cookies(session)
+    CURRENT_URL_PATH.write_text(final_url, encoding="utf-8")
+    logging.info("ERP 账号密码自动登录成功，登录态已保存到 %s", SESSION_PATH)
+
+
 def relogin() -> None:
+    if has_password_login_config():
+        try:
+            password_login()
+            return
+        except LoginRequiredError as exc:
+            logging.warning("ERP 账号密码自动登录失败，改用手动登录：%s", exc)
+
     AUTH_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as playwright:
@@ -300,8 +365,15 @@ def fetch_html_with_login(url: str, *, allow_relogin: bool = False) -> tuple[str
     if not is_login_page(html, final_url):
         return html, final_url
 
+    if has_password_login_config():
+        password_login()
+        session = build_requests_session()
+        html, final_url = _request_html(session, url)
+        if not is_login_page(html, final_url):
+            return html, final_url
+
     if not allow_relogin:
-        raise LoginRequiredError("ERP 登录态已失效，需要重新扫码或短信登录。")
+        raise LoginRequiredError("ERP 登录态已失效，账号密码自动登录也没有成功。")
 
     relogin()
     session = build_requests_session()
