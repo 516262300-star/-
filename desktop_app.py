@@ -4,6 +4,7 @@ import queue
 import subprocess
 import sys
 import threading
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import END, LEFT, RIGHT, BOTH, X, Y, BooleanVar, StringVar, Tk, Text, messagebox
@@ -112,9 +113,13 @@ class PddSyncApp:
 
     def _worker(self, args: list[str]) -> None:
         try:
+            env = os.environ.copy()
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
             self.process = subprocess.Popen(
                 args,
                 cwd=PROJECT_DIR,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
