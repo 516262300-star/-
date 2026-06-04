@@ -1,193 +1,220 @@
-# 拼多多一店广告数据同步到 Notion
+# 拼多多广告数据同步到 Notion
 
-这个项目用于从公司 ERP 抓取拼多多一店广告数据，并同步到 Notion 数据库：
+这个项目用于从公司 ERP 抓取拼多多一到七店的广告数据，并同步到对应的 Notion 数据库。
 
-- Notion 数据库：`拼多多一店-每日广告数据`
-- ERP 店铺：`store=22`，即 `1店：利德仕官方旗舰店`
+- ERP 数据页：`ldswj.net`
+- 默认店铺：一到七店，`--store all`
+- 默认日期：昨天，按 `Asia/Shanghai` 计算
 - 判重规则：`日期 + plan_id + 店铺`
+- 敏感信息：`.env` 和 `.auth/session.json` 不会提交到 GitHub
 
-## 1. 安装依赖
+## 1. 项目位置
 
-在项目目录打开 PowerShell：
-
-```powershell
-cd D:\desktop\codex\guanggao
-pip install -r requirements.txt
-playwright install chromium
-```
-
-如果 `playwright` 命令找不到，可以用：
-
-```powershell
-python -m playwright install chromium
-```
-
-## 2. 配置 .env
-
-项目根目录需要有 `.env` 文件，内容如下：
-
-```env
-NOTION_TOKEN=你的 Notion integration token
-NOTION_DATABASE_ID=你的 Notion 数据库 ID
-```
-
-注意：
-
-- `.env` 不要发给别人。
-- `.env` 已经在 `.gitignore` 里，不会提交。
-- 当前数据库已添加 `plan_id` 和 `店铺` 两列，用于防重复。
-
-## 3. 第一次登录 ERP
-
-第一次运行时，如果登录态失效，脚本会自动打开浏览器。
-
-你只需要：
-
-1. 在浏览器里扫码或短信登录 ERP。
-2. 登录完成后回到 PowerShell。
-3. 按一次回车。
-
-登录态会保存到：
-
-```text
-.auth/session.json
-```
-
-后面如果 cookie 没过期，就不需要重复扫码。
-
-## 4. 手动运行
-
-抓昨天的数据并写入 Notion：
-
-```powershell
-python main.py
-```
-
-抓指定单日：
-
-```powershell
-python main.py --date 2026-05-29
-```
-
-抓日期范围：
-
-```powershell
-python main.py --range 2026-05-01~2026-05-29
-```
-
-强制重新登录：
-
-```powershell
-python main.py --relogin
-```
-
-只检查抓取和解析，不写入 Notion：
-
-```powershell
-python main.py --date 2026-05-29 --dry-run
-```
-
-## 5. 字段或广告计划变动时怎么办
-
-如果只是 ERP 里新增广告计划，或者广告计划名称改了，通常不用改脚本。
-
-原因是脚本用下面三项判重：
-
-```text
-日期 + plan_id + 店铺
-```
-
-如果 ERP 新增了列、删除了列、改了按钮逻辑，先运行：
-
-```powershell
-python main.py --date 有数据的日期 --dry-run
-```
-
-确认日志里解析行数正常，再正式运行：
-
-```powershell
-python main.py --date 有数据的日期
-```
-
-## 6. Windows 任务计划程序
-
-目标：每天早上 9 点自动同步昨天的数据。
-
-### 创建任务
-
-1. 打开 Windows 搜索，输入 `任务计划程序`。
-2. 点击右侧 `创建基本任务...`。
-3. 名称填写：
-
-```text
-拼多多广告数据同步到 Notion
-```
-
-4. 触发器选择 `每天`。
-5. 时间设置为 `09:00:00`。
-6. 操作选择 `启动程序`。
-
-### 程序配置
-
-程序或脚本填写你的 Python 路径，例如：
-
-```text
-C:\Users\lds\AppData\Local\Programs\Python\Python312\python.exe
-```
-
-添加参数填写：
-
-```text
-main.py
-```
-
-起始于填写项目目录：
+本机路径：
 
 ```text
 D:\desktop\codex\guanggao
 ```
 
-这样每天 9 点会自动运行：
+主要文件：
 
-```powershell
-python main.py
+- `main.py`：同步主程序
+- `erp_client.py`：ERP 登录、抓取、解析
+- `notion_sync.py`：Notion 写入、字段映射、去重
+- `stores.py`：一到七店 ERP 和 Notion 映射
+- `run_daily.ps1`：每天 9 点定时任务调用的脚本
+- `desktop_app.py`：桌面控制面板
+- `启动拼多多广告同步.bat`：双击打开桌面软件
+
+## 2. 配置 .env
+
+项目根目录需要有 `.env`：
+
+```env
+NOTION_TOKEN=你的 Notion integration token
+NOTION_DATABASE_ID=一店 Notion 数据库 ID
+ERP_USERNAME=你的 ERP 账号或手机号
+ERP_PASSWORD=你的 ERP 密码
 ```
 
-也就是默认抓昨天的数据。
+说明：
 
-## 7. 日常检查
+- `.env` 已加入 `.gitignore`，不会上传 GitHub。
+- ERP 账号密码只放在 `.env`，不要写进代码。
+- 如果 ERP 登录态过期，脚本会优先用 `.env` 的账号密码自动登录。
+- 自动登录失败时，才会退回到手动扫码/短信登录。
 
-如果同步后想确认结果：
+## 3. 桌面软件
 
-1. 打开 Notion 数据库 `拼多多一店-每日广告数据`。
-2. 筛选昨天日期。
-3. 看 `广告计划`、`plan_id`、`花费`、`点击率`、`转化率`、`广告成交金额` 是否正常。
-
-如果发现 ERP 登录过期，手动运行一次：
-
-```powershell
-python main.py --relogin
-```
-
-扫码登录后，后续任务计划会继续使用新的登录态。
-
-## 8. 登录掉线通知
-
-每天 9 点的定时任务如果同步失败，会停止任务，并在 Notion 页面里评论提醒金博敏。
-
-登录态失效时会提醒：
+桌面上有快捷方式：
 
 ```text
-@金博敏 ERP 拼多多广告数据同步失败：ERP 登录态已失效，需要重新扫码或短信登录。
+拼多多广告同步
 ```
 
-其他失败也会提醒，例如 ERP 抓取失败、Notion 写入失败、字段解析异常等，提醒里会包含日期范围和错误原因。
+双击后可以操作：
 
-收到提醒后，在电脑上手动运行：
+- `同步昨天`
+- `同步单日`
+- `同步日期范围`
+- `重新登录并同步`
+- `打开日志文件夹`
+- `停止当前运行`
+
+日常推荐直接用这个桌面软件，不需要记命令。
+
+## 4. 手动命令
+
+先进入项目目录：
 
 ```powershell
 cd D:\desktop\codex\guanggao
-python main.py --relogin
 ```
 
-完成扫码或短信登录后，后续定时任务会继续自动同步。
+同步昨天一到七店：
+
+```powershell
+python main.py --store all
+```
+
+同步指定日期一到七店：
+
+```powershell
+python main.py --date 2026-06-03 --store all
+```
+
+同步日期范围：
+
+```powershell
+python main.py --range 2026-05-25~2026-05-31 --store all
+```
+
+只检查 ERP 抓取和解析，不写入 Notion：
+
+```powershell
+python main.py --date 2026-06-03 --store all --dry-run
+```
+
+强制重新登录并同步：
+
+```powershell
+python main.py --date 2026-06-03 --store all --relogin
+```
+
+## 5. 自动登录逻辑
+
+脚本会按这个顺序处理 ERP 登录：
+
+1. 先使用 `.auth/session.json` 里的已有登录态。
+2. 如果登录态过期，读取 `.env` 的 `ERP_USERNAME` 和 `ERP_PASSWORD` 自动登录。
+3. 自动登录成功后，重新保存 `.auth/session.json`。
+4. 如果账号密码自动登录失败，才弹出浏览器让人手动扫码/短信登录。
+
+因此，只要 `.env` 里的 ERP 账号密码有效，以后 ERP 自动退出时不需要手动扫码。
+
+## 6. Notion 写入逻辑
+
+每条广告数据按下面三项判重：
+
+```text
+日期 + plan_id + 店铺
+```
+
+如果 Notion 里已存在，就更新；不存在，就新建。
+
+脚本会写入这些主要字段：
+
+- 广告计划
+- 日期
+- 广告类型
+- 商品ID
+- 花费
+- 平均点击花费
+- 点击率
+- 转化率
+- 投产比
+- 曝光量
+- 推广曝光占比
+- 成交笔数
+- 每笔成交花费
+- 每笔成交金额
+- 广告成交金额
+- plan_id
+- 店铺
+
+百分比字段写入小数：
+
+- `点击率`
+- `转化率`
+- `推广曝光占比`
+
+例如 ERP 是 `13.66%`，脚本写入 `0.1366`，Notion 显示为 `13.66%`。
+
+## 7. 广告类型和商品ID
+
+广告类型自动判断：
+
+- 广告计划名包含 `全店托管`：写入 `全店托管`
+- 其他带 ID 或 plan_id 的计划：写入 `稳定成本`
+
+商品ID自动判断：
+
+- 只给 `稳定成本` 广告填写
+- 从广告计划名里的 `商品ID` 或 `ID` 后面提取数字
+- `全店托管` 不填商品ID
+
+## 8. 每天 9 点定时任务
+
+Windows 任务计划名称：
+
+```text
+拼多多广告数据同步到 Notion
+```
+
+执行脚本：
+
+```text
+D:\desktop\codex\guanggao\run_daily.ps1
+```
+
+每天 9 点会自动运行：
+
+```powershell
+python main.py --store all
+```
+
+如果 9 点电脑没开机，任务已设置为开机登录后尽快补跑。
+
+如果 ERP 登录态过期，脚本会尝试账号密码自动登录。账号密码自动登录失败时，会自动弹出一个 PowerShell/浏览器窗口，让你处理手动登录。
+
+## 9. 日志和排错
+
+日志目录：
+
+```text
+D:\desktop\codex\guanggao\debug
+```
+
+定时任务日志文件格式：
+
+```text
+task_YYYYMMDD_HHMMSS.log
+```
+
+常见情况：
+
+- ERP 登录态过期：脚本会自动账号密码登录。
+- Notion 网络失败：通常是电脑到 `api.notion.com` 连接不稳定，稍后重跑即可。
+- GitHub 推送失败：通常是电脑连不上 `github.com`，本地提交仍然保存。
+
+## 10. 安装依赖
+
+新电脑第一次安装：
+
+```powershell
+cd D:\desktop\codex\guanggao
+pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+如果是从 GitHub 重新拉代码，需要重新配置 `.env`，并重新跑一次同步让脚本生成 `.auth/session.json`。
