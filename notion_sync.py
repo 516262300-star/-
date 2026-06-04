@@ -153,8 +153,10 @@ def get_notification_page_id(client: Client) -> str:
 
 
 def notify_notion(message: str) -> None:
-    client = get_notion_client()
-    page_id = get_notification_page_id(client)
+    database_id = _default_database_id()
+    database = _notion_request("GET", f"/databases/{database_id}")
+    parent = database.get("parent", {})
+    page_id = parent["page_id"] if parent.get("type") == "page_id" else database_id
     rich_text = [
         {
             "type": "mention",
@@ -170,22 +172,23 @@ def notify_notion(message: str) -> None:
     ]
 
     try:
-        _with_retry(
-            lambda: client.comments.create(
-                parent={"page_id": page_id},
-                rich_text=rich_text,
-            )
+        _notion_request(
+            "POST",
+            "/comments",
+            payload={"parent": {"page_id": page_id}, "rich_text": rich_text},
         )
         return
-    except APIResponseError:
+    except Exception:
         # 有些 integration 可以创建页面，但没有 Comments API 权限。
         pass
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    _with_retry(
-        lambda: client.pages.create(
-            parent={"page_id": page_id},
-            properties={
+    _notion_request(
+        "POST",
+        "/pages",
+        payload={
+            "parent": {"page_id": page_id},
+            "properties": {
                 "title": {
                     "title": [
                         {
@@ -195,14 +198,14 @@ def notify_notion(message: str) -> None:
                     ]
                 }
             },
-            children=[
+            "children": [
                 {
                     "object": "block",
                     "type": "paragraph",
                     "paragraph": {"rich_text": rich_text},
                 }
             ],
-        )
+        },
     )
 
 
