@@ -44,7 +44,7 @@ class PddSyncApp:
 
         subtitle = ttk.Label(
             container,
-            text="默认同步一到七店。ERP 登录过期时，点“重新登录并同步”后按弹窗提示扫码/短信登录。",
+            text="默认同步一到七店。ERP 登录过期时会优先用 .env 里的账号密码自动登录，失败时才需要扫码/短信登录。",
         )
         subtitle.pack(anchor="w", pady=(4, 12))
 
@@ -189,7 +189,11 @@ class PddSyncApp:
             ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command],
             cwd=PROJECT_DIR,
         )
-        self._append_output(f"已打开重新登录窗口，请在浏览器登录 ERP 后回到新窗口按回车。\n日期：{date_text}，店铺：{store_text}\n")
+        self._append_output(
+            "已打开重新登录窗口，会先尝试 ERP 账号密码自动登录；"
+            "只有自动登录失败时才需要按窗口提示扫码/短信登录。\n"
+            f"日期：{date_text}，店铺：{store_text}\n"
+        )
 
     def open_logs(self) -> None:
         (PROJECT_DIR / "debug").mkdir(exist_ok=True)
