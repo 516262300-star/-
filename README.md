@@ -22,6 +22,7 @@ D:\desktop\codex\guanggao
 - `erp_client.py`：ERP 登录、抓取、解析
 - `notion_sync.py`：Notion 写入、字段映射、去重
 - `stores.py`：一到七店 ERP 和 Notion 映射
+- `catchup_daily.py`：自动检查 Notion 是否缺昨天数据，缺哪个店补哪个店
 - `run_daily.ps1`：每天 9 点定时任务调用的脚本
 - `desktop_app.py`：桌面控制面板
 - `启动拼多多广告同步.bat`：双击打开桌面软件
@@ -101,6 +102,18 @@ python main.py --date 2026-06-03 --store all --dry-run
 python main.py --date 2026-06-03 --store all --relogin
 ```
 
+检查 Notion 是否缺昨天数据，缺少才自动补跑：
+
+```powershell
+python catchup_daily.py --store all
+```
+
+检查指定日期是否缺数据，缺少才自动补跑：
+
+```powershell
+python catchup_daily.py --date 2026-06-04 --store all
+```
+
 ## 5. 自动登录逻辑
 
 脚本会按这个顺序处理 ERP 登录：
@@ -177,13 +190,20 @@ Windows 任务计划名称：
 D:\desktop\codex\guanggao\run_daily.ps1
 ```
 
-每天 9 点会自动运行：
+每天 9 点会自动运行补漏检查：
 
 ```powershell
-python main.py --store all
+python catchup_daily.py --date 昨天 --store all
 ```
 
-如果 9 点电脑没开机，任务已设置为开机登录后尽快补跑。
+运行逻辑：
+
+1. 先检查一到七店的 Notion 数据库里，昨天是否已经有广告数据。
+2. 已经有数据的店铺直接跳过。
+3. 没有数据的店铺才抓 ERP 并写入 Notion。
+4. 写入时仍按 `日期 + plan_id + 店铺` 去重，所以重复运行不会重复登记。
+
+如果 9 点电脑没开机，任务已设置为开机登录后尽快补跑；补跑时也会先查 Notion，发现昨天缺数据才自动补。
 
 如果 ERP 登录态过期，脚本会尝试账号密码自动登录。账号密码自动登录失败时，会自动弹出一个 PowerShell/浏览器窗口，让你处理手动登录。
 

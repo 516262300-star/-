@@ -591,6 +591,29 @@ def _date_range_filters(rows: list[dict], mapping: dict[str, PropertyInfo]) -> d
     }
 
 
+def has_rows_for_date(
+    *,
+    date: str,
+    data_source_id: str,
+) -> bool:
+    """Return whether the Notion data source already has at least one row for date."""
+    try:
+        schema = _get_database_schema_rest(data_source_id)
+    except Exception:
+        schema = _known_database_schema()
+    mapping = build_field_mapping(schema)
+    make_time_prop = mapping["make_time"]
+    response = _notion_request(
+        "POST",
+        f"/data_sources/{data_source_id}/query",
+        payload={
+            "filter": _filter_equals(make_time_prop, date),
+            "page_size": 1,
+        },
+    )
+    return bool(response.get("results"))
+
+
 def _load_existing_page_index(
     data_source_id: str,
     rows: list[dict],
