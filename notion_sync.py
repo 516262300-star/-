@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ DEFAULT_STORE_NAME = "1店：利德仕官方旗舰店"
 NOTION_NOTIFY_USER_ID = "356d872b-594c-8146-b021-0002d1442e4e"
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2025-09-03"
+NOTION_REQUEST_RETRIES = 5
+NOTION_REQUEST_TIMEOUT_SECONDS = 15
+NOTION_PAGE_CREATE_ATTEMPTS = 3
 
 PERCENT_FIELDS = {"click_rate", "convert_rate", "promotion_exposure_rate"}
 INTEGER_FIELDS = {
@@ -414,16 +418,23 @@ def sync_rows_to_notion(
     database_id: str | None = None,
     data_source_id: str | None = None,
 ) -> dict[str, int]:
+    logging.info("准备写入 Notion：%s 行", len(rows))
     resolved_data_source_id = data_source_id or _get_data_source_id_rest(database_id)
+    logging.info("读取 Notion 数据库字段")
     try:
         schema = _get_database_schema_rest(resolved_data_source_id)
     except Exception:
+        logging.exception("读取 Notion 字段失败，改用本地已知字段映射")
         schema = _known_database_schema()
     mapping = build_field_mapping(schema)
+    logging.info("读取 Notion 已有数据用于去重")
     existing_pages = _load_existing_page_index(resolved_data_source_id, rows, mapping)
+    logging.info("Notion 已有数据读取完成：%s 行", len(existing_pages))
 
     stats = {"created": 0, "updated": 0}
     for index, row in enumerate(rows, start=1):
+        if len(rows) <= 10 or index % 20 == 0:
+            logging.info("写入 Notion：%s/%s", index, len(rows))
         action = _upsert_row_rest(resolved_data_source_id, row, mapping, existing_pages)
         stats[action] += 1
         if index % 20 == 0:
@@ -441,12 +452,19 @@ def _notion_headers() -> dict[str, str]:
     }
 
 
-def _notion_request(method: str, path: str, *, payload: dict | None = None) -> dict:
+def _notion_request(
+    method: str,
+    path: str,
+    *,
+    payload: dict | None = None,
+    retries: int | None = None,
+) -> dict:
     delay = 1
     last_error: Exception | None = None
+    max_retries = retries or NOTION_REQUEST_RETRIES
 
-    for _ in range(20):
-        for trust_env in (False, True):
+    for attempt in range(1, max_retries + 1):
+        for trust_env in (True, False):
             session = requests.Session()
             session.trust_env = trust_env
             try:
@@ -457,10 +475,16 @@ def _notion_request(method: str, path: str, *, payload: dict | None = None) -> d
                     f"{NOTION_API_BASE}{path}",
                     headers=headers,
                     json=payload,
-                    timeout=45,
+                    timeout=NOTION_REQUEST_TIMEOUT_SECONDS,
                 )
                 if response.status_code == 429:
                     retry_after = float(response.headers.get("Retry-After", delay))
+                    logging.warning(
+                        "Notion 限流，等待 %s 秒后重试：%s %s",
+                        retry_after,
+                        method,
+                        path,
+                    )
                     time.sleep(retry_after)
                     continue
                 if response.status_code >= 400:
@@ -473,6 +497,15 @@ def _notion_request(method: str, path: str, *, payload: dict | None = None) -> d
                 return result
             except Exception as exc:
                 last_error = exc
+                logging.warning(
+                    "Notion 请求失败，准备重试：%s %s，第 %s/%s 次，代理=%s，错误：%s",
+                    method,
+                    path,
+                    attempt,
+                    max_retries,
+                    "开" if trust_env else "关",
+                    exc,
+                )
             finally:
                 session.close()
 
@@ -620,7 +653,7 @@ def _load_existing_page_index(
     mapping: dict[str, PropertyInfo],
 ) -> dict[tuple[str, str, str], str]:
     page_index: dict[tuple[str, str, str], str] = {}
-    payload: dict[str, Any] = {"page_size": 1}
+    payload: dict[str, Any] = {"page_size": 100}
     date_filter = _date_range_filters(rows, mapping)
     if date_filter:
         payload["filter"] = date_filter
@@ -639,6 +672,7 @@ def _load_existing_page_index(
         if not response.get("has_more"):
             return page_index
 
+        logging.info("继续读取 Notion 已有数据：已读取 %s 行", len(page_index))
         payload["start_cursor"] = response.get("next_cursor")
 
 
@@ -662,6 +696,41 @@ def _find_existing_page_rest(
     return results[0]["id"] if results else None
 
 
+def _create_page_rest(
+    data_source_id: str,
+    row: dict,
+    mapping: dict[str, PropertyInfo],
+    properties: dict,
+) -> str:
+    for attempt in range(1, NOTION_PAGE_CREATE_ATTEMPTS + 1):
+        try:
+            response = _notion_request(
+                "POST",
+                "/pages",
+                payload={
+                    "parent": {"data_source_id": data_source_id},
+                    "properties": properties,
+                },
+                retries=1,
+            )
+            return response.get("id", "")
+        except Exception as exc:
+            logging.warning(
+                "Notion 新建页面失败，反查是否已创建：第 %s/%s 次，错误：%s",
+                attempt,
+                NOTION_PAGE_CREATE_ATTEMPTS,
+                exc,
+            )
+            page_id = _find_existing_page_rest(data_source_id, row, mapping)
+            if page_id:
+                logging.info("Notion 页面已创建但回包失败，已通过反查确认：%s", page_id)
+                return page_id
+            if attempt >= NOTION_PAGE_CREATE_ATTEMPTS:
+                raise
+
+    raise NotionSyncError("Notion 新建页面失败")
+
+
 def _upsert_row_rest(
     data_source_id: str,
     row: dict,
@@ -678,16 +747,9 @@ def _upsert_row_rest(
         _notion_request("PATCH", f"/pages/{page_id}", payload={"properties": properties})
         return "updated"
 
-    response = _notion_request(
-        "POST",
-        "/pages",
-        payload={
-            "parent": {"data_source_id": data_source_id},
-            "properties": properties,
-        },
-    )
+    page_id = _create_page_rest(data_source_id, row, mapping, properties)
     if existing_pages is not None:
-        existing_pages[key] = response.get("id", "")
+        existing_pages[key] = page_id
     return "created"
 
 
