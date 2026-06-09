@@ -25,6 +25,7 @@ NOTION_VERSION = "2025-09-03"
 NOTION_REQUEST_RETRIES = 5
 NOTION_REQUEST_TIMEOUT_SECONDS = 15
 NOTION_PAGE_CREATE_ATTEMPTS = 3
+PENDING_NOTION_DIR = Path("debug/pending_notion")
 _preferred_notion_trust_env: bool | None = None
 
 PERCENT_FIELDS = {"click_rate", "convert_rate", "promotion_exposure_rate"}
@@ -427,24 +428,75 @@ def sync_rows_to_notion(
     logging.info("读取 Notion 数据库字段")
     try:
         schema = _get_database_schema_rest(resolved_data_source_id)
-    except Exception:
-        logging.exception("读取 Notion 字段失败，改用本地已知字段映射")
+    except Exception as exc:
+        logging.warning(
+            "读取 Notion 字段失败，改用本地已知字段映射：%s: %s",
+            type(exc).__name__,
+            exc,
+        )
         schema = _known_database_schema()
     mapping = build_field_mapping(schema)
     logging.info("读取 Notion 已有数据用于去重")
-    existing_pages = _load_existing_page_index(resolved_data_source_id, rows, mapping)
+    try:
+        existing_pages = _load_existing_page_index(resolved_data_source_id, rows, mapping)
+    except Exception as exc:
+        pending_path = _save_pending_notion_rows(
+            rows,
+            data_source_id=resolved_data_source_id,
+            reason=f"读取已有数据失败：{type(exc).__name__}: {exc}",
+        )
+        raise NotionSyncError(
+            f"Notion 读取已有数据失败，已保存待补写文件：{pending_path}"
+        ) from exc
     logging.info("Notion 已有数据读取完成：%s 行", len(existing_pages))
 
     stats = {"created": 0, "updated": 0}
     for index, row in enumerate(rows, start=1):
         if len(rows) <= 10 or index % 20 == 0:
             logging.info("写入 Notion：%s/%s", index, len(rows))
-        action = _upsert_row_rest(resolved_data_source_id, row, mapping, existing_pages)
+        try:
+            action = _upsert_row_rest(resolved_data_source_id, row, mapping, existing_pages)
+        except Exception as exc:
+            pending_path = _save_pending_notion_rows(
+                rows[index - 1 :],
+                data_source_id=resolved_data_source_id,
+                reason=f"写入第 {index}/{len(rows)} 行失败：{type(exc).__name__}: {exc}",
+            )
+            raise NotionSyncError(
+                f"Notion 写入中断，剩余 {len(rows) - index + 1} 行已保存待补写文件：{pending_path}"
+            ) from exc
         stats[action] += 1
         if index % 20 == 0:
             print(f"已同步 {index}/{len(rows)} 行")
 
     return stats
+
+
+def _save_pending_notion_rows(
+    rows: list[dict],
+    *,
+    data_source_id: str,
+    reason: str,
+) -> Path:
+    PENDING_NOTION_DIR.mkdir(parents=True, exist_ok=True)
+    if rows:
+        store_id = str(rows[0].get("store_id") or "unknown")
+        dates = sorted({str(row.get("make_time") or "unknown") for row in rows})
+        date_part = f"{dates[0]}_{dates[-1]}" if dates else "unknown"
+    else:
+        store_id = "unknown"
+        date_part = "unknown"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = PENDING_NOTION_DIR / f"pending_store_{store_id}_{date_part}_{timestamp}.json"
+    payload = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "data_source_id": data_source_id,
+        "reason": reason,
+        "rows": rows,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    logging.error("Notion 待补写数据已保存：%s", path)
+    return path
 
 
 def _notion_headers() -> dict[str, str]:
@@ -519,15 +571,23 @@ def _notion_request(
             finally:
                 session.close()
 
-        log = logging.warning if attempt >= max_retries else logging.info
-        log(
-            "Notion 请求暂时失败，准备重试：%s %s，第 %s/%s 次，%s",
-            method,
-            path,
-            attempt,
-            max_retries,
-            "；".join(route_errors),
-        )
+        if attempt >= max_retries:
+            logging.warning(
+                "Notion 请求失败：%s %s，第 %s/%s 次，%s",
+                method,
+                path,
+                attempt,
+                max_retries,
+                "；".join(route_errors),
+            )
+        else:
+            logging.info(
+                "Notion 请求暂时失败，准备重试：%s %s，第 %s/%s 次",
+                method,
+                path,
+                attempt,
+                max_retries,
+            )
         time.sleep(delay)
         delay = min(delay * 1.5, 20)
 

@@ -43,9 +43,17 @@ def main() -> None:
     logging.info("开始补漏检查：%s，店铺：%s", args.date, ", ".join(store_ids))
 
     missing_store_ids: list[str] = []
+    failed_checks: list[str] = []
     for store_id in store_ids:
         store = get_store(store_id)
-        if has_rows_for_date(date=args.date, data_source_id=store.data_source_id):
+        try:
+            has_rows = has_rows_for_date(date=args.date, data_source_id=store.data_source_id)
+        except Exception as exc:
+            failure = f"{store.name}（{type(exc).__name__}: {exc}）"
+            failed_checks.append(failure)
+            logging.error("Notion 检查失败，暂不补跑这个店：%s，日期 %s", failure, args.date)
+            continue
+        if has_rows:
             logging.info("Notion 已有数据，跳过：%s，日期 %s", store.name, args.date)
             continue
         logging.warning("Notion 缺少数据，准备补跑：%s，日期 %s", store.name, args.date)
@@ -53,6 +61,8 @@ def main() -> None:
 
     if not missing_store_ids:
         logging.info("补漏检查完成：Notion 已有 %s 的全部店铺数据，无需补跑", args.date)
+        if failed_checks:
+            raise SystemExit(f"部分店铺 Notion 检查失败：{', '.join(failed_checks)}")
         return
 
     if args.dry_run:
@@ -61,15 +71,25 @@ def main() -> None:
         return
 
     totals = {"created": 0, "updated": 0, "rows": 0}
+    failed_syncs: list[str] = []
     try:
         for store_id in missing_store_ids:
-            stats = sync_one_store(
-                store_id=store_id,
-                begin_date=args.date,
-                end_date=args.date,
-                relogin=False,
-                dry_run=False,
-            )
+            store = get_store(store_id)
+            try:
+                stats = sync_one_store(
+                    store_id=store_id,
+                    begin_date=args.date,
+                    end_date=args.date,
+                    relogin=False,
+                    dry_run=False,
+                )
+            except LoginRequiredError:
+                raise
+            except Exception as exc:
+                failure = f"{store.name}（{type(exc).__name__}: {exc}）"
+                failed_syncs.append(failure)
+                logging.error("店铺补漏失败，继续处理下一个：%s", failure)
+                continue
             totals["created"] += stats["created"]
             totals["updated"] += stats["updated"]
             totals["rows"] += stats["rows"]
@@ -100,6 +120,9 @@ def main() -> None:
         totals["created"],
         totals["updated"],
     )
+    failed_all = failed_checks + failed_syncs
+    if failed_all:
+        raise SystemExit(f"部分店铺补漏失败：{', '.join(failed_all)}")
 
 
 if __name__ == "__main__":

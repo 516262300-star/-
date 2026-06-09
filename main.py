@@ -115,21 +115,34 @@ def main() -> None:
     logging.info("任务开始：%s ~ %s，店铺：%s", begin_date, end_date, ", ".join(store_ids))
 
     totals = {"created": 0, "updated": 0, "rows": 0}
+    failed_stores: list[str] = []
     try:
         for index, store_id in enumerate(store_ids):
-            stats = sync_one_store(
-                store_id=store_id,
-                begin_date=begin_date,
-                end_date=end_date,
-                relogin=args.relogin and index == 0,
-                dry_run=args.dry_run,
-            )
+            store = get_store(store_id)
+            try:
+                stats = sync_one_store(
+                    store_id=store_id,
+                    begin_date=begin_date,
+                    end_date=end_date,
+                    relogin=args.relogin and index == 0,
+                    dry_run=args.dry_run,
+                )
+            except LoginRequiredError:
+                raise
+            except Exception as exc:
+                failure = f"{store.name}（{type(exc).__name__}: {exc}）"
+                failed_stores.append(failure)
+                logging.error("店铺同步失败，已继续处理下一个：%s", failure)
+                continue
             totals["created"] += stats["created"]
             totals["updated"] += stats["updated"]
             totals["rows"] += stats["rows"]
 
         if args.dry_run:
             logging.info("dry-run 完成：共解析 %s 行，未写入 Notion", totals["rows"])
+            if failed_stores:
+                logging.error("部分店铺 dry-run 失败：%s", "；".join(failed_stores))
+                raise SystemExit(1)
             return
 
         logging.info(
@@ -138,6 +151,9 @@ def main() -> None:
             totals["created"],
             totals["updated"],
         )
+        if failed_stores:
+            logging.error("部分店铺同步失败：%s", "；".join(failed_stores))
+            raise SystemExit(1)
     except LoginRequiredError as exc:
         message = (
             f"ERP 拼多多广告数据同步失败（{begin_date} ~ {end_date}）：{exc} "
