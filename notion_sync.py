@@ -25,6 +25,7 @@ NOTION_VERSION = "2025-09-03"
 NOTION_REQUEST_RETRIES = 5
 NOTION_REQUEST_TIMEOUT_SECONDS = 15
 NOTION_PAGE_CREATE_ATTEMPTS = 3
+_preferred_notion_trust_env: bool | None = None
 
 PERCENT_FIELDS = {"click_rate", "convert_rate", "promotion_exposure_rate"}
 INTEGER_FIELDS = {
@@ -419,6 +420,9 @@ def sync_rows_to_notion(
     data_source_id: str | None = None,
 ) -> dict[str, int]:
     logging.info("准备写入 Notion：%s 行", len(rows))
+    if not rows:
+        return {"created": 0, "updated": 0}
+
     resolved_data_source_id = data_source_id or _get_data_source_id_rest(database_id)
     logging.info("读取 Notion 数据库字段")
     try:
@@ -459,12 +463,23 @@ def _notion_request(
     payload: dict | None = None,
     retries: int | None = None,
 ) -> dict:
+    global _preferred_notion_trust_env
+
     delay = 1
     last_error: Exception | None = None
     max_retries = retries or NOTION_REQUEST_RETRIES
 
     for attempt in range(1, max_retries + 1):
-        for trust_env in (True, False):
+        route_errors: list[str] = []
+        if _preferred_notion_trust_env is None:
+            trust_env_options = [False, True]
+        else:
+            trust_env_options = [
+                _preferred_notion_trust_env,
+                not _preferred_notion_trust_env,
+            ]
+
+        for trust_env in trust_env_options:
             session = requests.Session()
             session.trust_env = trust_env
             try:
@@ -494,21 +509,25 @@ def _notion_request(
                     )
                 result = response.json()
                 time.sleep(0.25)
+                _preferred_notion_trust_env = trust_env
                 return result
             except Exception as exc:
                 last_error = exc
-                logging.warning(
-                    "Notion 请求失败，准备重试：%s %s，第 %s/%s 次，代理=%s，错误：%s",
-                    method,
-                    path,
-                    attempt,
-                    max_retries,
-                    "开" if trust_env else "关",
-                    exc,
+                route_errors.append(
+                    f"代理={'开' if trust_env else '关'}，错误：{exc}"
                 )
             finally:
                 session.close()
 
+        log = logging.warning if attempt >= max_retries else logging.info
+        log(
+            "Notion 请求暂时失败，准备重试：%s %s，第 %s/%s 次，%s",
+            method,
+            path,
+            attempt,
+            max_retries,
+            "；".join(route_errors),
+        )
         time.sleep(delay)
         delay = min(delay * 1.5, 20)
 

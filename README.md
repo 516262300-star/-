@@ -144,6 +144,8 @@ python catchup_daily.py --date 2026-06-04 --store all
 
 Notion API 请求会优先使用系统代理，并在 SSL/连接中断时重试。如果新建页面 `POST /pages` 时回包断开，脚本会先按 `日期 + plan_id + 店铺` 反查是否已经创建，避免重复登记。
 
+如果某一路网络临时断开但后续重试成功，日志只记录为普通进度，不再刷 `WARNING`。只有全部重试都失败时，才会显示 Notion 请求失败的 `WARNING`。
+
 脚本会写入这些主要字段：
 
 - 广告计划
@@ -236,6 +238,7 @@ task_YYYYMMDD_HHMMSS.log
 - Notion 网络失败：通常是电脑到 `api.notion.com` 连接不稳定，稍后重跑即可。
 - 如果日志里看到 `POST /pages` 的 SSL 或 EOF 错误，表示已经进入 Notion 新建页面阶段，是网络回包中断；重跑会先反查已创建页面，减少重复写入风险。
 - 如果日志停在 `读取 Notion 数据库字段` 或 `读取 Notion 已有数据用于去重`，优先检查电脑到 `api.notion.com` 的网络或代理。
+- 如果日志只显示某个店“缺少数据，准备补跑”，但实际同步抓取 0 行，通常表示 ERP 当天这个店没有广告行，不是 Notion 写入失败。
 - GitHub 推送失败：通常是电脑连不上 `github.com`，本地提交仍然保存。
 
 ## 10. 代码修改收尾规则
