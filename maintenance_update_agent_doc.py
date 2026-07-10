@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from notion_sync import _notion_request
+from notion_sync import NotionSyncError, _notion_request
 
 
 PAGE_ID = "3737db4d-c72f-8196-831a-c46c8e4ae6c2"
@@ -45,7 +45,7 @@ def build_blocks() -> list[dict]:
         bullet("同步写入时仍按“日期 + plan_id + 店铺”去重，所以同一天重复运行不会重复登记。"),
         bullet("ERP 登录过期时，会先用 .env 里的 ERP 账号密码自动登录；只有账号密码失败时才需要人工扫码或短信登录。"),
         bullet("如果同步失败，脚本会在 Notion 里提醒 @金博敏，并在 debug 日志里留下错误原因。"),
-        bullet("Notion 写入阶段会显示读取字段、读取已有数据、写入第几行；临时网络断开但重试成功时不再刷 WARNING，只有全部重试失败才报警。"),
+        bullet("Notion 写入阶段会显示读取字段、读取已有数据、写入第几行；Windows 上优先使用系统 curl/Schannel，失败后再尝试 Python 直连和系统代理；只有全部路线重试失败才报警。"),
         heading(2, "2. 日常怎么用"),
         paragraph("正常情况："),
         bullet("每天早上只需要打开电脑并登录 Windows。"),
@@ -171,7 +171,7 @@ def build_blocks() -> list[dict]:
         paragraph("Notion 网络失败怎么办？"),
         bullet("稍后重跑 catchup_daily.py。因为有去重和缺失检查，不会重复登记。"),
         bullet("如果日志里看到 POST /pages 的 SSL 或 EOF 错误，表示已经进入 Notion 新建页面阶段，是网络回包中断；重跑会先反查已创建页面。"),
-        bullet("如果日志停在“读取 Notion 数据库字段”或“读取 Notion 已有数据用于去重”，优先检查电脑到 api.notion.com 的网络或代理。"),
+        bullet("如果日志停在“读取 Notion 数据库字段”或“读取 Notion 已有数据用于去重”，先等待 5 次重试完成，不要提前停止；最终 WARNING 会分别列出 Windows TLS、Python 直连和系统代理错误。"),
         bullet("如果日志只显示某个店“缺少数据，准备补跑”，但实际同步抓取 0 行，通常表示 ERP 当天这个店没有广告行，不是 Notion 写入失败。"),
         bullet("如果日志显示“Notion 待补写数据已保存”，网络恢复后重新跑同一天同店即可；脚本会按去重规则写入或更新。"),
         paragraph("ERP 后台还没登记全店托管数据怎么办？"),
@@ -223,7 +223,22 @@ def archive_existing_children(page_id: str) -> None:
             path += f"&start_cursor={cursor}"
         response = _notion_request("GET", path)
         for block in response.get("results", []):
-            _notion_request("PATCH", f"/blocks/{block['id']}", payload={"archived": True})
+            try:
+                _notion_request(
+                    "PATCH",
+                    f"/blocks/{block['id']}",
+                    payload={"archived": True},
+                )
+            except NotionSyncError as exc:
+                error: BaseException | None = exc
+                already_archived = False
+                while error is not None:
+                    if "Can't edit block that is archived" in str(error):
+                        already_archived = True
+                        break
+                    error = error.__cause__ or error.__context__
+                if not already_archived:
+                    raise
             archived_count += 1
             if archived_count % 10 == 0:
                 print(f"已归档旧内容 {archived_count} 个块", flush=True)

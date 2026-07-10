@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,7 +28,7 @@ NOTION_REQUEST_RETRIES = 5
 NOTION_REQUEST_TIMEOUT_SECONDS = 15
 NOTION_PAGE_CREATE_ATTEMPTS = 3
 PENDING_NOTION_DIR = Path("debug/pending_notion")
-_preferred_notion_trust_env: bool | None = None
+_preferred_notion_route: str | None = None
 
 PERCENT_FIELDS = {"click_rate", "convert_rate", "promotion_exposure_rate"}
 INTEGER_FIELDS = {
@@ -91,6 +93,12 @@ class PropertyInfo:
 
 class NotionSyncError(RuntimeError):
     pass
+
+
+class NotionHTTPError(NotionSyncError):
+    def __init__(self, status_code: int, response_text: str) -> None:
+        self.status_code = status_code
+        super().__init__(f"Notion HTTP {status_code}: {response_text[:1000]}")
 
 
 def _require_config() -> None:
@@ -508,6 +516,74 @@ def _notion_headers() -> dict[str, str]:
     }
 
 
+def _curl_config_escape(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\t", "\\t")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
+def _notion_request_windows_tls(
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    payload: dict | None,
+) -> tuple[int, str]:
+    """Call Notion through Windows curl/Schannel without exposing the token in argv."""
+    curl_exe = shutil.which("curl.exe")
+    if not curl_exe:
+        raise NotionSyncError("Windows curl.exe 不可用")
+
+    marker = "__NOTION_HTTP_STATUS__="
+    config_lines = [
+        "silent",
+        "show-error",
+        f'request = "{_curl_config_escape(method)}"',
+        f'url = "{_curl_config_escape(f"{NOTION_API_BASE}{path}")}"',
+        f'max-time = "{NOTION_REQUEST_TIMEOUT_SECONDS}"',
+        f'write-out = "\\n{marker}%{{http_code}}"',
+    ]
+    for name, value in headers.items():
+        config_lines.append(
+            f'header = "{_curl_config_escape(f"{name}: {value}")}"'
+        )
+    config_lines.append('header = "Connection: close"')
+    if payload is not None:
+        payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        config_lines.append(f'data-binary = "{_curl_config_escape(payload_text)}"')
+
+    try:
+        completed = subprocess.run(
+            [curl_exe, "--noproxy", "*", "--config", "-"],
+            input="\n".join(config_lines) + "\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=NOTION_REQUEST_TIMEOUT_SECONDS + 5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise NotionSyncError("Windows TLS 请求超时") from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"curl 退出码 {completed.returncode}"
+        raise NotionSyncError(detail)
+    if marker not in completed.stdout:
+        raise NotionSyncError("Windows TLS 请求缺少 HTTP 状态码")
+
+    body, status_text = completed.stdout.rsplit(marker, 1)
+    try:
+        status_code = int(status_text.strip())
+    except ValueError as exc:
+        raise NotionSyncError(f"Windows TLS 返回无效状态码：{status_text.strip()}") from exc
+    return status_code, body.rstrip("\r\n")
+
+
 def _notion_request(
     method: str,
     path: str,
@@ -515,7 +591,7 @@ def _notion_request(
     payload: dict | None = None,
     retries: int | None = None,
 ) -> dict:
-    global _preferred_notion_trust_env
+    global _preferred_notion_route
 
     delay = 1
     last_error: Exception | None = None
@@ -523,15 +599,41 @@ def _notion_request(
 
     for attempt in range(1, max_retries + 1):
         route_errors: list[str] = []
-        if _preferred_notion_trust_env is None:
-            trust_env_options = [False, True]
+        available_routes = ["windows_tls", "direct", "system_proxy"]
+        if _preferred_notion_route is None:
+            route_options = available_routes
         else:
-            trust_env_options = [
-                _preferred_notion_trust_env,
-                not _preferred_notion_trust_env,
+            route_options = [_preferred_notion_route] + [
+                route for route in available_routes if route != _preferred_notion_route
             ]
 
-        for trust_env in trust_env_options:
+        for route in route_options:
+            if route == "windows_tls":
+                try:
+                    status_code, response_text = _notion_request_windows_tls(
+                        method,
+                        path,
+                        headers=_notion_headers(),
+                        payload=payload,
+                    )
+                    if status_code >= 400:
+                        raise NotionHTTPError(status_code, response_text)
+                    result = json.loads(response_text)
+                    time.sleep(0.25)
+                    _preferred_notion_route = route
+                    return result
+                except Exception as exc:
+                    if (
+                        isinstance(exc, NotionHTTPError)
+                        and 400 <= exc.status_code < 500
+                        and exc.status_code != 429
+                    ):
+                        raise
+                    last_error = exc
+                    route_errors.append(f"Windows TLS，错误：{exc}")
+                continue
+
+            trust_env = route == "system_proxy"
             session = requests.Session()
             session.trust_env = trust_env
             try:
@@ -556,17 +658,21 @@ def _notion_request(
                     continue
                 if response.status_code >= 400:
                     error_text = response.text[:1000]
-                    raise NotionSyncError(
-                        f"Notion HTTP {response.status_code}: {error_text}"
-                    )
+                    raise NotionHTTPError(response.status_code, error_text)
                 result = response.json()
                 time.sleep(0.25)
-                _preferred_notion_trust_env = trust_env
+                _preferred_notion_route = route
                 return result
             except Exception as exc:
+                if (
+                    isinstance(exc, NotionHTTPError)
+                    and 400 <= exc.status_code < 500
+                    and exc.status_code != 429
+                ):
+                    raise
                 last_error = exc
                 route_errors.append(
-                    f"代理={'开' if trust_env else '关'}，错误：{exc}"
+                    f"{'系统代理' if trust_env else 'Python 直连'}，错误：{exc}"
                 )
             finally:
                 session.close()
