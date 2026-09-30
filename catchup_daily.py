@@ -96,7 +96,7 @@ def main() -> None:
     except LoginRequiredError as exc:
         message = (
             f"ERP 拼多多广告数据补漏失败（{args.date}）：{exc} "
-            "脚本已配置账号密码自动登录；如果仍失败，请检查 .env 的 ERP_USERNAME / ERP_PASSWORD。"
+            "请在 Leedis 桌面客户端完成登录后，重新执行补漏任务。"
         )
         logging.error(message)
         try:

@@ -8,11 +8,9 @@ from typing import Iterable
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
 import requests
 
-from config import ERP_PASSWORD, ERP_USERNAME
+from erp_desktop_auth import DesktopLoginRequired, get_client_cookies
 from stores import get_store
 
 
@@ -88,34 +86,11 @@ def build_pdd_ad_url(
 
 
 def capture_first_page_html(date: str = "2026-05-27") -> Path:
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-
     output_path = DEBUG_DIR / f"page_{date}_p1.html"
-
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context()
-        page = context.new_page()
-
-        page.goto(ERP_PDD_AD_URL, wait_until="domcontentloaded")
-        print("请在浏览器里扫码或短信登录。")
-        print("登录完成后回到终端按回车，脚本会自动打开拼多多广告数据页面。")
-        input()
-
-        page.goto(ERP_PDD_AD_URL, wait_until="domcontentloaded")
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except PlaywrightTimeoutError:
-            pass
-
-        html = page.content()
-        output_path.write_text(html, encoding="utf-8")
-        CURRENT_URL_PATH.write_text(page.url, encoding="utf-8")
-        context.storage_state(path=str(SESSION_PATH))
-
-        browser.close()
-
+    html, url = fetch_html_with_login(build_pdd_ad_url(date, date))
+    output_path.write_text(html, encoding="utf-8")
+    CURRENT_URL_PATH.write_text(url, encoding="utf-8")
     return output_path
 
 
@@ -244,113 +219,24 @@ def _set_query_param(url: str, key: str, value: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
 
 
-def _load_storage_state_cookies() -> list[dict]:
-    if not SESSION_PATH.exists():
-        return []
-
-    data = json.loads(SESSION_PATH.read_text(encoding="utf-8"))
-    return data.get("cookies", [])
-
-
-def build_requests_session() -> requests.Session:
+def build_requests_session(*, force: bool = False) -> requests.Session:
+    try:
+        cookies = get_client_cookies(force=force)
+    except DesktopLoginRequired as exc:
+        raise LoginRequiredError(str(exc)) from exc
     session = requests.Session()
     session.headers.update({"User-Agent": ERP_USER_AGENT})
-
-    for cookie in _load_storage_state_cookies():
-        session.cookies.set(
-            cookie["name"],
-            cookie["value"],
-            domain=cookie.get("domain"),
-            path=cookie.get("path", "/"),
-        )
-
+    for cookie in cookies:
+        session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie.get("path", "/"))
     return session
 
 
-def has_password_login_config() -> bool:
-    return bool(ERP_USERNAME and ERP_PASSWORD)
-
-
-def _save_session_cookies(session: requests.Session) -> None:
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
-    cookies = []
-    for cookie in session.cookies:
-        cookies.append(
-            {
-                "name": cookie.name,
-                "value": cookie.value,
-                "domain": cookie.domain or "ldswj.net",
-                "path": cookie.path or "/",
-                "expires": cookie.expires or -1,
-                "httpOnly": bool(cookie.has_nonstandard_attr("HttpOnly")),
-                "secure": bool(cookie.secure),
-                "sameSite": "Lax",
-            }
-        )
-
-    SESSION_PATH.write_text(json.dumps({"cookies": cookies}, indent=2), encoding="utf-8")
-
-
-def password_login() -> None:
-    if not has_password_login_config():
-        raise LoginRequiredError("ERP 登录态已失效，且 .env 未配置 ERP_USERNAME / ERP_PASSWORD。")
-
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto(ERP_LOGIN_PAGE_URL, wait_until="domcontentloaded", timeout=30000)
-        page.fill('input[name="phone"]', ERP_USERNAME)
-        page.fill('input[name="password"]', ERP_PASSWORD)
-        page.click("input.dl")
-        try:
-            page.wait_for_url("**/login/profile", timeout=10000)
-        except PlaywrightTimeoutError:
-            page.wait_for_timeout(3000)
-
-        page.goto(ERP_PDD_AD_URL, wait_until="domcontentloaded", timeout=30000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except PlaywrightTimeoutError:
-            pass
-
-        html = page.content()
-        if is_login_page(html, page.url):
-            browser.close()
-            raise LoginRequiredError("ERP 账号密码自动登录后仍然停留在登录页，请检查账号密码或账号权限。")
-
-        context.storage_state(path=str(SESSION_PATH))
-        CURRENT_URL_PATH.write_text(page.url, encoding="utf-8")
-        browser.close()
-    logging.info("ERP 账号密码自动登录成功，登录态已保存到 %s", SESSION_PATH)
-
-
 def relogin() -> None:
-    if has_password_login_config():
-        try:
-            password_login()
-            return
-        except LoginRequiredError as exc:
-            logging.warning("ERP 账号密码自动登录失败，改用手动登录：%s", exc)
-
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
-
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto(ERP_PDD_AD_URL, wait_until="domcontentloaded")
-        print("登录态失效，请在浏览器里扫码或短信登录，登录完成后回到终端按回车")
-        input()
-        page.goto(ERP_PDD_AD_URL, wait_until="domcontentloaded")
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except PlaywrightTimeoutError:
-            pass
-        context.storage_state(path=str(SESSION_PATH))
-        CURRENT_URL_PATH.write_text(page.url, encoding="utf-8")
-        browser.close()
+    try:
+        get_client_cookies(force=True)
+    except DesktopLoginRequired as exc:
+        raise LoginRequiredError(str(exc)) from exc
+    logging.info("已通过 Leedis 客户端刷新 ERP 网页登录态")
 
 
 def _request_html(session: requests.Session, url: str) -> tuple[str, str]:
@@ -361,28 +247,12 @@ def _request_html(session: requests.Session, url: str) -> tuple[str, str]:
 
 
 def fetch_html_with_login(url: str, *, allow_relogin: bool = False) -> tuple[str, str]:
-    session = build_requests_session()
-    html, final_url = _request_html(session, url)
-    if not is_login_page(html, final_url):
-        return html, final_url
-
-    if has_password_login_config():
-        password_login()
-        session = build_requests_session()
-        html, final_url = _request_html(session, url)
+    for force in (False, True):
+        with build_requests_session(force=force) as session:
+            html, final_url = _request_html(session, url)
         if not is_login_page(html, final_url):
             return html, final_url
-
-    if not allow_relogin:
-        raise LoginRequiredError("ERP 登录态已失效，账号密码自动登录也没有成功。")
-
-    relogin()
-    session = build_requests_session()
-    html, final_url = _request_html(session, url)
-    if is_login_page(html, final_url):
-        raise LoginRequiredError("重新登录后仍然没有进入广告数据页，请检查账号权限或登录状态。")
-
-    return html, final_url
+    raise LoginRequiredError("ERP 登录态已失效，请在 Leedis 桌面客户端登录后重试。")
 
 
 def fetch_all_ad_pages(start_url: str) -> list[dict]:

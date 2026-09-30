@@ -34,16 +34,15 @@ D:\desktop\codex\guanggao
 ```env
 NOTION_TOKEN=你的 Notion integration token
 NOTION_DATABASE_ID=一店 Notion 数据库 ID
-ERP_USERNAME=你的 ERP 账号或手机号
-ERP_PASSWORD=你的 ERP 密码
+# ERP 登录使用 Leedis 客户端，无需账号密码
 ```
 
 说明：
 
 - `.env` 已加入 `.gitignore`，不会上传 GitHub。
-- ERP 账号密码只放在 `.env`，不要写进代码。
-- 如果 ERP 登录态过期，脚本会优先用 `.env` 的账号密码自动登录。
-- 自动登录失败时，才会退回到手动扫码/短信登录。
+- ERP 登录统一使用 Leedis 桌面客户端。
+- ERP 网页登录态过期时，通过客户端重新打开系统。
+- 客户端未登录时停止任务；请先在客户端登录，再重试。
 
 ## 3. 桌面软件
 
@@ -58,7 +57,7 @@ ERP_PASSWORD=你的 ERP 密码
 - `同步昨天`
 - `同步单日`
 - `同步日期范围`
-- `重新登录并同步`
+- `刷新客户端登录并同步`
 - `打开日志文件夹`
 - `停止当前运行`
 
@@ -96,7 +95,7 @@ python main.py --range 2026-05-25~2026-05-31 --store all
 python main.py --date 2026-06-03 --store all --dry-run
 ```
 
-强制重新登录并同步：
+强制刷新客户端登录并同步：
 
 ```powershell
 python main.py --date 2026-06-03 --store all --relogin
@@ -114,16 +113,26 @@ python catchup_daily.py --store all
 python catchup_daily.py --date 2026-06-04 --store all
 ```
 
-## 5. 自动登录逻辑
+## ERP 客户端登录（2026-09-30）
 
-脚本会按这个顺序处理 ERP 登录：
+ERP 统一复用 **Leedis 桌面客户端**。先在客户端完成登录，任务通过客户端“打开系统”取得专用 ERP Chrome 的网页登录态；不再读取 ERP_USERNAME、ERP_PHONE、ERP_PASSWORD，也不回退账号密码或脚本扫码登录。客户端凭据仍由客户端和 Windows 凭据管理器保管。任务只在内存使用 ldswj.net 的网站 Cookie，不再读取旧 `.auth/session.json`、`.erp_session.bin` 或 `states/erp.json`。
 
-1. 先使用 `.auth/session.json` 里的已有登录态。
-2. 如果登录态过期，读取 `.env` 的 `ERP_USERNAME` 和 `ERP_PASSWORD` 自动登录。
-3. 自动登录成功后，重新保存 `.auth/session.json`。
-4. 如果账号密码自动登录失败，才弹出浏览器让人手动扫码/短信登录。
+本机已配置客户端。换电脑时安装 LeedisClient.exe、Google Chrome 和项目 requirements.txt，然后运行工作台仓库的安装命令（替换成实际客户端路径）：
 
-因此，只要 `.env` 里的 ERP 账号密码有效，以后 ERP 自动退出时不需要手动扫码。
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/setup_erp_client.ps1 -ClientExe "D:\desktop\客户端登录\Leedis-Windows\LeedisClient.exe"
+```
+
+配置保存在 `%LOCALAPPDATA%/LeedisDesktop/workbench-config.json`，只记录客户端路径；也可用 `ERP_CLIENT_EXE` 覆盖路径。安装脚本生成客户端需要的 `%USERPROFILE%/Desktop/ERP Chrome.lnk`，使用独立浏览器目录 `%LOCALAPPDATA%/LeedisDesktop/erp-chrome` 和本机 9222 端口。已有配置和快捷方式先备份再更新。网站登录态属于敏感本机数据，不提交到 GitHub。
+
+客户端尚未运行时自动启动并尝试恢复已有登录；未登录、客户端忙、9222 不可用或登录过期无法恢复时，任务失败并显示提示。请在客户端登录后重试原任务；不会自动尝试账号密码，不会关闭客户端或 ERP Chrome。自动任务仍需在已登录 Windows 的同一用户会话下执行。切换客户端账号后，应结束当前任务并重新运行。
+
+```powershell
+python erp_desktop_auth.py login  # 客户端登录，需要授权时由本人完成
+python erp_desktop_auth.py check  # 打开系统并只读检查网页会话
+```
+
+公共接入代码维护源为工作台 `tools/erp_desktop_auth.py`；各业务仓库包含同版副本，可独立运行。更新公共模块时同步四个业务副本。升级无需移植旧网页 Cookie，旧密码配置可自行删除，程序已不再使用。
 
 ## 6. Notion 写入逻辑
 
@@ -218,7 +227,7 @@ python catchup_daily.py --date 昨天 --store all
 
 如果 9 点电脑没开机，任务已设置为开机登录后尽快补跑；补跑时也会先查 Notion，发现昨天缺数据才自动补。
 
-如果 ERP 登录态过期，脚本会尝试账号密码自动登录。账号密码自动登录失败时，会自动弹出一个 PowerShell/浏览器窗口，让你处理手动登录。
+如果 ERP 登录态过期，脚本通过客户端刷新网站会话；客户端未登录时记录失败，登录客户端后手动重跑补漏。定时脚本不再弹出旧的重新登录同步窗口。
 
 ## 9. 日志和排错
 
@@ -236,7 +245,7 @@ task_YYYYMMDD_HHMMSS.log
 
 常见情况：
 
-- ERP 登录态过期：脚本会自动账号密码登录。
+- ERP 登录态过期：请先在 Leedis 客户端登录后重试。
 - Notion 网络失败：脚本会依次尝试 Windows TLS、Python 直连和系统代理；三条路线都失败时才会结束本轮请求。可先确认 Windows 自带的 `curl.exe` 存在，再检查 `api.notion.com` 和代理节点。
 - 如果日志里看到 `POST /pages` 的 SSL 或 EOF 错误，表示已经进入 Notion 新建页面阶段，是网络回包中断；重跑会先反查已创建页面，减少重复写入风险。
 - 如果日志停在 `读取 Notion 数据库字段` 或 `读取 Notion 已有数据用于去重`，等待 5 次重试完成，不要提前停止任务；最终 `WARNING` 会分别列出 Windows TLS、Python 直连和系统代理的错误。

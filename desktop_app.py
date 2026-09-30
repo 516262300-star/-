@@ -44,7 +44,7 @@ class PddSyncApp:
 
         subtitle = ttk.Label(
             container,
-            text="默认同步一到七店。ERP 登录过期时会优先用 .env 里的账号密码自动登录，失败时才需要扫码/短信登录。",
+            text="默认同步一到七店。ERP 统一复用 Leedis 桌面客户端登录；未登录时请先在客户端登录。",
         )
         subtitle.pack(anchor="w", pady=(4, 12))
 
@@ -75,7 +75,7 @@ class PddSyncApp:
         ttk.Button(buttons, text="同步昨天", command=self.sync_yesterday).pack(side=LEFT, padx=(0, 8))
         ttk.Button(buttons, text="同步单日", command=self.sync_single_date).pack(side=LEFT, padx=(0, 8))
         ttk.Button(buttons, text="同步日期范围", command=self.sync_range).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(buttons, text="重新登录并同步", command=self.relogin_and_sync).pack(side=LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="刷新客户端登录并同步", command=self.relogin_and_sync).pack(side=LEFT, padx=(0, 8))
         ttk.Button(buttons, text="打开日志文件夹", command=self.open_logs).pack(side=RIGHT, padx=(8, 0))
         ttk.Button(buttons, text="停止当前运行", command=self.stop_process).pack(side=RIGHT)
 
@@ -190,8 +190,8 @@ class PddSyncApp:
             cwd=PROJECT_DIR,
         )
         self._append_output(
-            "已打开重新登录窗口，会先尝试 ERP 账号密码自动登录；"
-            "只有自动登录失败时才需要按窗口提示扫码/短信登录。\n"
+            "已打开同步窗口，将复用 Leedis 桌面客户端登录；"
+            "客户端未登录时请先完成客户端登录，再重试。\n"
             f"日期：{date_text}，店铺：{store_text}\n"
         )
 

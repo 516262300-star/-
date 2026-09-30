@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonExe = "C:\Users\lds\AppData\Local\Programs\Python\Python312\python.exe"
@@ -22,13 +22,5 @@ $ErrorActionPreference = "Continue"
 $ExitCode = $LASTEXITCODE
 "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Exit code: $ExitCode" | Tee-Object -FilePath $LogFile -Append
 
-if ($ExitCode -ne 0) {
-    $LogText = Get-Content -LiteralPath $LogFile -Raw
-    if ($LogText -match "ERP.*登录态已失效|LoginRequiredError") {
-        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ERP login expired; opening relogin window for $SyncDate" | Tee-Object -FilePath $LogFile -Append
-        $ReloginCommand = "Set-Location '$ProjectDir'; & '$PythonExe' main.py --date $SyncDate --store all --relogin; Read-Host '运行结束，按回车关闭窗口'"
-        Start-Process -FilePath powershell.exe -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $ReloginCommand)
-    }
-}
-
+# 客户端未登录时保留失败日志；人工在客户端登录后重跑补漏，不弹密码窗口。
 exit $ExitCode

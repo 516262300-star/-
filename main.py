@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="22",
         help="店铺 ID，多个用逗号分隔，例如 222,223；也可填 all。默认只跑一店 22。",
     )
-    parser.add_argument("--relogin", action="store_true", help="强制重新扫码/短信登录 ERP")
+    parser.add_argument("--relogin", action="store_true", help="通过 Leedis 客户端刷新 ERP 网页登录态")
     parser.add_argument("--dry-run", action="store_true", help="只抓取解析，不写入 Notion")
     return parser
 
@@ -157,7 +157,7 @@ def main() -> None:
     except LoginRequiredError as exc:
         message = (
             f"ERP 拼多多广告数据同步失败（{begin_date} ~ {end_date}）：{exc} "
-            f"请在电脑上运行 python main.py --relogin，完成扫码/短信登录。"
+            f"请在电脑上运行 python main.py --relogin，复用 Leedis 客户端登录态；客户端未登录时请先在客户端登录。"
         )
         logging.error(message)
         try:
