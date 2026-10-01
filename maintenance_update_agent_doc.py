@@ -44,6 +44,8 @@ def build_blocks() -> list[dict]:
         bullet("补跑不是盲目重复登记，而是先检查 Notion：哪个店昨天没有数据，才补哪个店。"),
         bullet("同步写入时仍按“日期 + plan_id + 店铺”去重，所以同一天重复运行不会重复登记。"),
         bullet("ERP 统一复用 Leedis 桌面客户端。客户端未登录时停止任务，先在客户端登录后再重试；不再读取 ERP 账号密码。"),
+        bullet("2026-10-01 接入修复：客户端打开系统成功后，ERP Chrome 连接最多尝试 3 次（每次最多 10 秒）；网页会话在 45 秒等待期内重试验证，单次请求最多 10 秒，在途请求可能使总等待略超 45 秒。短暂超时或连接重置不再立即终止，也不会重复调用客户端登录。"),
+        bullet("接入失败会区分 9222 端口连接失败和网页会话验证失败，记录异常类型或 HTTP 状态，不记录 Cookie 或凭据。先用 python erp_desktop_auth.py check 验证；ERP 网页显示登录页时再登录客户端，然后用 python main.py --date YYYY-MM-DD --store all 重跑。"),
         bullet("如果同步失败，脚本会在 Notion 里提醒 @金博敏，并在 debug 日志里留下错误原因。"),
         bullet("Notion 写入阶段会显示读取字段、读取已有数据、写入第几行；Windows 上优先使用系统 curl/Schannel，失败后再尝试 Python 直连和系统代理；只有全部路线重试失败才报警。"),
         heading(2, "2. 日常怎么用"),

@@ -134,6 +134,14 @@ python erp_desktop_auth.py check  # 打开系统并只读检查网页会话
 
 公共接入代码维护源为工作台 `tools/erp_desktop_auth.py`；各业务仓库包含同版副本，可独立运行。更新公共模块时同步四个业务副本。升级无需移植旧网页 Cookie，旧密码配置可自行删除，程序已不再使用。
 
+### 客户端接入重试（2026-10-01）
+
+客户端“打开系统”成功后，脚本会最多尝试 3 次连接 ERP Chrome（每次最多 10 秒）；连接后在 45 秒等待期内检查网站会话，单次验证请求最多 10 秒。浏览器启动延迟、验证请求短暂超时或连接重置会自动重试，不重复调用客户端登录。最后一次在途验证可能使总等待略超过 45 秒。
+
+最终失败会区分“9222 端口连接失败”和“网页会话验证失败”，并记录异常类型或 HTTP 状态，不输出 Cookie 或客户端凭据。网页会话验证失败时，先确认 ERP 网页能正常打开；显示登录页才需在客户端重新登录。可用 `python erp_desktop_auth.py check` 只读验证，再用 `python main.py --date YYYY-MM-DD --store all` 重跑，按原判重规则更新或新建。
+
+2026-10-01 09:00 的失败发生在客户端返回成功后的网页接入阶段，尚未写入广告数据。旧日志未保留底层异常，无法确认当时属于端口、超时还是连接重置；本次补足重试和分阶段诊断。
+
 ## 6. Notion 写入逻辑
 
 每条广告数据按下面三项判重：
@@ -271,4 +279,4 @@ pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-如果是从 GitHub 重新拉代码，需要重新配置 `.env`，并重新跑一次同步让脚本生成 `.auth/session.json`。
+如果是从 GitHub 重新拉代码，需要重新配置 `.env`、安装并配置 Leedis 客户端与 ERP Chrome；先运行 `python erp_desktop_auth.py check` 检查登录，再执行同步。程序不再生成或读取旧 `.auth/session.json`。
