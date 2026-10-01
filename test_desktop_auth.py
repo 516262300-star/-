@@ -1,12 +1,68 @@
 import unittest
 import asyncio
 from types import SimpleNamespace
+from pathlib import Path
+import tempfile
 from unittest.mock import AsyncMock, Mock, patch
 import erp_client as erp
 import erp_desktop_auth as auth
 from erp_desktop_auth import DesktopLoginRequired
 
 class AdsDesktopTests(unittest.TestCase):
+    def setUp(self):
+        auth._cookies = None
+
+    def tearDown(self):
+        auth._cookies = None
+
+    def test_valid_session_reused_across_runs_without_opening_tabs(self):
+        cookie = {'domain': 'ldswj.net', 'name': 'session', 'value': 'synthetic'}
+        with patch.object(auth, '_read_browser_cookies', new_callable=AsyncMock, return_value=[cookie]), patch.object(auth, 'client_action') as command:
+            for _ in range(3):
+                auth._cookies = None  # Each scheduled process starts with no cache.
+                self.assertEqual(auth.get_client_cookies(), [cookie])
+            command.assert_not_called()
+
+    def test_unavailable_session_opens_only_once_then_verifies(self):
+        cookie = {'domain': 'ldswj.net', 'name': 'session', 'value': 'synthetic'}
+        with patch.object(auth, '_read_browser_cookies', new_callable=AsyncMock, side_effect=[auth._SessionRefreshRequired('expired'), [cookie]]) as read, patch.object(auth, 'client_action') as command:
+            self.assertEqual(auth.get_client_cookies(), [cookie])
+            command.assert_called_once_with('open')
+            self.assertEqual(read.await_count, 2)
+
+    def test_read_only_check_never_opens_browser_even_on_failure(self):
+        with patch.object(auth, '_read_browser_cookies', new_callable=AsyncMock, side_effect=DesktopLoginRequired('unavailable')), patch.object(auth, 'client_action') as command:
+            with self.assertRaises(DesktopLoginRequired):
+                auth.get_client_cookies(force=True, allow_open=False)
+            command.assert_not_called()
+
+    def test_network_failure_does_not_open_unnecessary_webpage(self):
+        with patch.object(auth, '_read_browser_cookies', new_callable=AsyncMock, side_effect=DesktopLoginRequired('network timeout')), patch.object(auth, 'client_action') as command:
+            with self.assertRaises(DesktopLoginRequired):
+                auth.get_client_cookies()
+            command.assert_not_called()
+
+    def test_explicit_refresh_opens_once(self):
+        with patch.object(auth, '_read_browser_cookies', new_callable=AsyncMock, return_value=[{'name': 'new'}]), patch.object(auth, 'client_action') as command:
+            self.assertEqual(auth.get_client_cookies(force=True), [{'name': 'new'}])
+            command.assert_called_once_with('open')
+
+    def test_background_browser_is_headless_and_closed_on_success_or_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            profile = Path(folder) / 'LeedisDesktop' / 'erp-chrome'
+            profile.mkdir(parents=True)
+            for failure in (False, True):
+                context = SimpleNamespace(close=AsyncMock())
+                chromium = SimpleNamespace(launch_persistent_context=AsyncMock(return_value=context))
+                with patch.dict(auth.os.environ, {'LOCALAPPDATA': folder}), patch.object(auth, '_verified_cookies', new_callable=AsyncMock, return_value=[{'name': 'session'}], side_effect=DesktopLoginRequired('expired') if failure else None):
+                    if failure:
+                        with self.assertRaises(DesktopLoginRequired):
+                            asyncio.run(auth._read_background_cookies(chromium))
+                    else:
+                        self.assertEqual(asyncio.run(auth._read_background_cookies(chromium)), [{'name': 'session'}])
+                chromium.launch_persistent_context.assert_awaited_once_with(str(profile), channel='chrome', headless=True, timeout=15000)
+                context.close.assert_awaited_once()
+
     def test_browser_startup_connection_retries(self):
         browser = object()
         chromium = SimpleNamespace(connect_over_cdp=AsyncMock(side_effect=[OSError('private URL'), browser]))
